@@ -1,0 +1,15 @@
+# High-Quality Advertisement Player Requirements
+# Python 3.8+ recommended
+
+# GUI Framework - Qt5 for professional GUI with hardware acceleration
+PyQt5>=5.15.9
+
+# Computer Vision - Full OpenCV with GUI support (NOT headless)
+# Note: Use opencv-python (not opencv-python-headless) for video display
+opencv-python>=4.8.0
+
+# Image Processing - High-quality image manipulation
+Pillow>=10.0.0
+
+# Numerical Computing - Array operations for video frames
+numpy>=1.24.0
