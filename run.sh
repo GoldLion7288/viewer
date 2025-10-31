@@ -148,8 +148,8 @@ case "$COMMAND" in
         echo "Starting Video Player GUI with background: $BACKGROUND_IMAGE"
 
         # --single-instance flag will auto-restart if already running
-        # Run in background and capture output
-        $PYTHON_CMD "$MAIN_SCRIPT" --start "$BACKGROUND_IMAGE" --single-instance > /tmp/video_player.log 2>&1 &
+        # Run in background
+        $PYTHON_CMD "$MAIN_SCRIPT" --start "$BACKGROUND_IMAGE" --single-instance > /dev/null 2>&1 &
         GUI_PID=$!
 
         # Wait and verify it started
@@ -157,14 +157,8 @@ case "$COMMAND" in
 
         if ps -p $GUI_PID > /dev/null 2>&1; then
             echo "GUI started successfully (PID: $GUI_PID)"
-            echo "View logs: tail -f /tmp/video_player.log"
         else
             echo "ERROR: GUI failed to start!"
-            echo ""
-            echo "Error log:"
-            echo "=========================================="
-            cat /tmp/video_player.log
-            echo "=========================================="
             exit 1
         fi
         ;;
