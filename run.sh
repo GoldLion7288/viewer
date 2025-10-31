@@ -1,7 +1,7 @@
 # adver.def Configuration Guide
 
 ## File Location
-- **Development**: `D:\2025_10_31(video_test)\adver.def`
+- **Development**: `etc/adver.def`
 - **Production (Raspberry Pi)**: `/etc/adver.def`
 
 ## Configuration Format
