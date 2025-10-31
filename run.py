@@ -274,6 +274,13 @@ class AdPlayerWindow(QMainWindow):
             new_width = int(img_width * scale)
             new_height = int(img_height * scale)
 
+            # Extra safety check for regular media - ensure it never exceeds screen
+            if not is_background:
+                if new_width > screen_width or new_height > screen_height:
+                    scale = min(screen_width / new_width, screen_height / new_height)
+                    new_width = int(new_width * scale)
+                    new_height = int(new_height * scale)
+
             # Resize with HIGHEST quality (LANCZOS/ANTIALIAS)
             pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
 
@@ -344,6 +351,12 @@ class AdPlayerWindow(QMainWindow):
             scale = min(screen_width / width, screen_height / height)
             new_width = int(width * scale)
             new_height = int(height * scale)
+
+            # Extra safety check - ensure frame never exceeds screen bounds
+            if new_width > screen_width or new_height > screen_height:
+                scale = min(screen_width / new_width, screen_height / new_height)
+                new_width = int(new_width * scale)
+                new_height = int(new_height * scale)
 
             # Use LANCZOS4 for highest quality scaling
             frame_resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
