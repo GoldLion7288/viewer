@@ -9,8 +9,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Auto-detect and use virtual environment if available
+if [ -d "$SCRIPT_DIR/venv" ] && [ -f "$SCRIPT_DIR/venv/bin/python3" ]; then
+    PYTHON_CMD="$SCRIPT_DIR/venv/bin/python3"
+    echo "Using virtual environment: $SCRIPT_DIR/venv"
+else
+    PYTHON_CMD="python3"
+    echo "Warning: Virtual environment not found. Using system Python."
+fi
+
 # Configuration
-PYTHON_CMD="python3"
 MAIN_SCRIPT="run.py"
 
 # Fix Qt platform plugin issues
