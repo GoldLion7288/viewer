@@ -1,112 +1,219 @@
-# adver.def Configuration Guide
+#!/bin/bash
+# Video Player Launcher Script for Ubuntu/Raspberry Pi
+# Supports: start, play, stop, exit commands
 
-## File Location
-- **Development**: `etc/adver.def`
-- **Production (Raspberry Pi)**: `/etc/adver.def`
+# Set strict error handling
+set -euo pipefail
 
-## Configuration Format
+# Get script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
-The `adver.def` file contains configuration parameters read by `video.sh`. Each line represents a specific configuration value:
+# Auto-detect and use virtual environment if available
+if [ -d "$SCRIPT_DIR/venv" ] && [ -f "$SCRIPT_DIR/venv/bin/python3" ]; then
+    PYTHON_CMD="$SCRIPT_DIR/venv/bin/python3"
+    echo "Using virtual environment: $SCRIPT_DIR/venv"
+else
+    PYTHON_CMD="python3"
+    echo "Warning: Virtual environment not found. Using system Python."
+fi
 
-```
-Line 1  (index 0): SERVICE_NAME     - Service identifier (e.g., "adver")
-Line 2  (index 1): VERSION/ID       - Version or region code (e.g., "001")
-Line 3  (index 2): REGION/ID        - Additional identifier (e.g., "002")
-Line 4  (index 3): DOWNLOAD_URL     - URL for downloading content
-Line 5  (index 4): EXEC_DIR         - Base execution directory (e.g., "/home/pi/")
-Line 6  (index 5): DATA_DIR         - Data storage directory (e.g., "/home/pi/data/")
-Line 7  (index 6): DOWNLOAD_DIR     - Download directory (e.g., "/home/pi/download/")
-Line 8  (index 7): TRIGGER          - Trigger file path (e.g., "/home/pi/download/trigger")
-Line 9  (index 8): CRON             - Cron permission file (e.g., "/home/pi/cron")
-Line 10 (index 9): USERNAME         - System username (e.g., "pi")
-```
+# Configuration
+MAIN_SCRIPT="run.py"
 
-## Current Configuration
+# Fix Qt platform plugin issues
+export QT_QPA_PLATFORM_PLUGIN_PATH=""
+export QT_DEBUG_PLUGINS=0
+unset QT_PLUGIN_PATH
 
-```
-adver
-001
-002
-https://uninyavision.sakura.ne.jp/adver/
-/home/pi/
-/home/pi/data/
-/home/pi/download/
-/home/pi/download/trigger
-/home/pi/cron
-pi
-```
+# Ensure DISPLAY is set (default to physical :0)
+if [ -z "${DISPLAY:-}" ]; then
+    export DISPLAY=:0
+fi
 
-## How video.sh Uses This File
+# If running as root from cron, wire this process to the active desktop session
+if [ "$(id -u)" -eq 0 ]; then
+    # Try to detect the active graphical user (seat0) and its UID
+    DESKTOP_USER=""
+    DESKTOP_UID=""
 
-```bash
-readarray data < "/etc/adver.def"
+    if command -v loginctl >/dev/null 2>&1; then
+        # Pick the first active session on seat0 (common for local console)
+        SESSION_LINE="$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3=="seat0" && $2!="" {print; exit}')"
+        if [ -n "$SESSION_LINE" ]; then
+            DESKTOP_UID="$(echo "$SESSION_LINE" | awk '{print $2}')"
+            DESKTOP_USER="$(id -nu "$DESKTOP_UID" 2>/dev/null || true)"
+        fi
+        # Fallback: take any active session
+        if [ -z "$DESKTOP_USER" ]; then
+            SESSION_LINE="$(loginctl list-sessions --no-legend 2>/dev/null | awk '$1!="" {print; exit}')"
+            if [ -n "$SESSION_LINE" ]; then
+                DESKTOP_UID="$(echo "$SESSION_LINE" | awk '{print $2}')"
+                DESKTOP_USER="$(id -nu "$DESKTOP_UID" 2>/dev/null || true)"
+            fi
+        fi
+    fi
 
-SERVICE_NAME=${data[0]//$'\n'/}      # Line 1: adver
-EXEC_DIR=${data[4]//$'\n'/}          # Line 5: /home/pi/
-DATA_DIR=${data[5]//$'\n'/}          # Line 6: /home/pi/data/
-DOWNLOAD_DIR=${data[6]//$'\n'/}      # Line 7: /home/pi/download/
-TRIGGER=${data[7]//$'\n'/}           # Line 8: /home/pi/download/trigger
-CRON=${data[8]//$'\n'/}              # Line 9: /home/pi/cron
-```
+    # Additional fallbacks when loginctl isn't helpful
+    if [ -z "$DESKTOP_USER" ]; then
+        # User owning the console often maps to the active desktop user
+        if [ -e /dev/console ]; then
+            DESKTOP_USER="$(stat -c '%U' /dev/console 2>/dev/null || true)"
+        fi
+    fi
+    if [ -n "$DESKTOP_USER" ] && [ -z "$DESKTOP_UID" ]; then
+        DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || true)"
+    fi
 
-Then executes:
-```bash
-${EXEC_DIR}viewer/run.sh start ${EXEC_DIR}background.jpg
-```
+    # Wire X11 auth to the desktop user's authority cookie
+    if [ -z "${XAUTHORITY:-}" ] && [ -n "$DESKTOP_USER" ]; then
+        # Common location
+        if [ -f "/home/$DESKTOP_USER/.Xauthority" ]; then
+            export XAUTHORITY="/home/$DESKTOP_USER/.Xauthority"
+        fi
+        # Snap/Ubuntu variants sometimes place it under XDG_RUNTIME_DIR
+        if [ -z "${XAUTHORITY:-}" ] && [ -n "$DESKTOP_UID" ] && [ -f "/run/user/$DESKTOP_UID/gdm/Xauthority" ]; then
+            export XAUTHORITY="/run/user/$DESKTOP_UID/gdm/Xauthority"
+        fi
+    fi
 
-Which translates to:
-```bash
-/home/pi/viewer/run.sh start /home/pi/background.jpg
-```
+    # Set XDG runtime and DBus session (needed by many desktops)
+    if [ -n "$DESKTOP_UID" ]; then
+        export XDG_RUNTIME_DIR="/run/user/$DESKTOP_UID"
+        if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "/run/user/$DESKTOP_UID/bus" ]; then
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DESKTOP_UID/bus"
+        fi
+    fi
 
-## Directory Structure Expected on Raspberry Pi
+    # Force Qt to use X11/XWayland when DISPLAY is present
+    if [ -n "${DISPLAY:-}" ]; then
+        export QT_QPA_PLATFORM="xcb"
+    fi
 
-```
-/home/pi/
-├── viewer/
-│   ├── run.sh           # Main launcher script
-│   ├── run.py           # Python video player
-│   └── venv/            # Python virtual environment (optional)
-├── data/
-│   ├── test1.mp4        # Video files
-│   ├── test2.mp4
-│   └── ...
-├── download/
-│   └── trigger          # Trigger file for updates
-├── cron                 # Cron permission file
-└── background.jpg       # Background image
+    # Helpful diagnostics (only when interactive shell has a TTY)
+    if [ -t 1 ]; then
+        echo "Running as root; bound to desktop user: ${DESKTOP_USER:-unknown} (UID: ${DESKTOP_UID:-?})"
+        echo "DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset} DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unset}"
+    fi
+fi
 
-/etc/
-└── adver.def           # This configuration file
-```
+# Function to show usage
+show_usage() {
+    echo "Video Player Launcher"
+    echo "====================="
+    echo "Usage:"
+    echo "  $0 start <background_image>  - Start GUI with background (auto-restart if running)"
+    echo "  $0 play <file> <duration>    - Play file for duration seconds"
+    echo "  $0 stop                      - Stop playback and return to background"
+    echo "  $0 exit                      - Exit GUI"
+    echo ""
+    echo "Examples:"
+    echo "  sudo -u pi $0 start /home/pi/background.jpg"
+    echo "  sudo -u pi $0 play /home/pi/data/test1.mp4 10"
+    echo "  sudo -u pi $0 stop"
+    echo "  sudo -u pi $0 exit"
+    echo ""
+}
 
-## Installation on Raspberry Pi
+# Check if script exists
+if [ ! -f "$MAIN_SCRIPT" ]; then
+    echo "Error: $MAIN_SCRIPT not found in $SCRIPT_DIR"
+    exit 1
+fi
 
-1. Copy `adver.def` to `/etc/adver.def`:
-   ```bash
-   sudo cp adver.def /etc/adver.def
-   sudo chmod 644 /etc/adver.def
-   ```
+# Check arguments
+if [ $# -lt 1 ]; then
+    show_usage
+    exit 1
+fi
 
-2. Create required directories:
-   ```bash
-   mkdir -p /home/pi/viewer
-   mkdir -p /home/pi/data
-   mkdir -p /home/pi/download
-   ```
+COMMAND="$1"
 
-3. Deploy the viewer system to `/home/pi/viewer/`
+# Handle commands
+case "$COMMAND" in
+    "start")
+        if [ $# -lt 2 ]; then
+            echo "Error: background image path required"
+            show_usage
+            exit 1
+        fi
+        BACKGROUND_IMAGE="$2"
 
-4. Place a background image at `/home/pi/background.jpg`
+        # Validate background image exists
+        if [ ! -f "$BACKGROUND_IMAGE" ]; then
+            echo "Warning: Background image '$BACKGROUND_IMAGE' not found"
+            # Continue anyway - run.py will handle it
+        fi
 
-5. Run video.sh (typically from cron or systemd as root):
-   ```bash
-   sudo bash video.sh
-   ```
+        echo "Starting Video Player GUI with background: $BACKGROUND_IMAGE"
 
-## Notes
+        # --single-instance flag will auto-restart if already running
+        # Run in background and capture output
+        $PYTHON_CMD "$MAIN_SCRIPT" --start "$BACKGROUND_IMAGE" --single-instance > /tmp/video_player.log 2>&1 &
+        GUI_PID=$!
 
-- All paths must end without trailing slashes except where explicitly shown
-- The file must use Unix line endings (LF, not CRLF)
-- Each line must contain exactly one value
-- Empty lines at the end are acceptable but not required
+        # Wait and verify it started
+        sleep 2
+
+        if ps -p $GUI_PID > /dev/null 2>&1; then
+            echo "GUI started successfully (PID: $GUI_PID)"
+            echo "View logs: tail -f /tmp/video_player.log"
+        else
+            echo "ERROR: GUI failed to start!"
+            echo ""
+            echo "Error log:"
+            echo "=========================================="
+            cat /tmp/video_player.log
+            echo "=========================================="
+            exit 1
+        fi
+        ;;
+
+    "play")
+        if [ $# -lt 3 ]; then
+            echo "Error: file path and duration required"
+            show_usage
+            exit 1
+        fi
+        FILE_PATH="$2"
+        DURATION="$3"
+
+        # Validate file exists
+        if [ ! -f "$FILE_PATH" ]; then
+            echo "Error: File '$FILE_PATH' not found"
+            exit 1
+        fi
+
+        # Validate duration is a number
+        if ! [[ "$DURATION" =~ ^[0-9]+$ ]]; then
+            echo "Error: Duration must be a positive integer (seconds)"
+            exit 1
+        fi
+
+        echo "Playing: $FILE_PATH for $DURATION seconds"
+        $PYTHON_CMD "$MAIN_SCRIPT" --play "$FILE_PATH" "$DURATION" --single-instance
+        ;;
+
+    "stop")
+        echo "Stopping playback..."
+        $PYTHON_CMD "$MAIN_SCRIPT" --stop
+        echo "Playback stopped. Returned to background."
+        ;;
+
+    "exit")
+        echo "Exiting GUI..."
+        $PYTHON_CMD "$MAIN_SCRIPT" --exit
+
+        # Wait for clean shutdown
+        sleep 0.5
+        echo "GUI closed."
+        ;;
+
+    *)
+        echo "Error: Unknown command '$COMMAND'"
+        show_usage
+        exit 1
+        ;;
+esac
+
+exit 0
