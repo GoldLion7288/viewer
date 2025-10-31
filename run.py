@@ -262,23 +262,15 @@ class AdPlayerWindow(QMainWindow):
                 screen_width = screen_size.width()
                 screen_height = screen_size.height()
 
-            # Calculate scaling to fill screen completely (crop if needed)
+            # Calculate scaling to show entire image (maintain aspect ratio)
             img_width, img_height = pil_image.size
-            scale = max(screen_width / img_width, screen_height / img_height)
+            scale = min(screen_width / img_width, screen_height / img_height)
 
             new_width = int(img_width * scale)
             new_height = int(img_height * scale)
 
             # Resize with HIGHEST quality (LANCZOS/ANTIALIAS)
             pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
-
-            # Center crop if image is larger than screen
-            if new_width > screen_width or new_height > screen_height:
-                left = (new_width - screen_width) // 2
-                top = (new_height - screen_height) // 2
-                right = left + screen_width
-                bottom = top + screen_height
-                pil_image = pil_image.crop((left, top, right, bottom))
 
             # Convert to QPixmap with high quality
             img_array = np.array(pil_image)
@@ -335,19 +327,13 @@ class AdPlayerWindow(QMainWindow):
                 screen_width = screen_size.width()
                 screen_height = screen_size.height()
 
-            # Calculate scaling to fill screen completely (crop if needed)
-            scale = max(screen_width / width, screen_height / height)
+            # Calculate scaling to show entire frame (maintain aspect ratio)
+            scale = min(screen_width / width, screen_height / height)
             new_width = int(width * scale)
             new_height = int(height * scale)
 
             # Use LANCZOS4 for highest quality scaling
             frame_resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
-
-            # Center crop if frame is larger than screen
-            if new_width > screen_width or new_height > screen_height:
-                x_offset = (new_width - screen_width) // 2
-                y_offset = (new_height - screen_height) // 2
-                frame_resized = frame_resized[y_offset:y_offset+screen_height, x_offset:x_offset+screen_width]
 
             # Convert to QPixmap with high quality settings
             height, width, channel = frame_resized.shape
