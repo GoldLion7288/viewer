@@ -221,7 +221,7 @@ class AdPlayerWindow(QMainWindow):
     def display_initial_background(self):
         """Display initial background after window is fully initialized"""
         if self.background_image and os.path.exists(self.background_image):
-            self.display_image(self.background_image, 0)
+            self.display_image(self.background_image, 0, is_background=True)
 
     def handle_ipc_command(self, command):
         """Handle commands received via IPC"""
@@ -239,7 +239,7 @@ class AdPlayerWindow(QMainWindow):
         elif cmd_type == 'EXIT':
             self.close()
 
-    def display_image(self, image_path, duration):
+    def display_image(self, image_path, duration, is_background=False):
         """Display image with MAXIMUM high quality"""
         try:
             # Load image with Pillow for better quality
@@ -262,15 +262,28 @@ class AdPlayerWindow(QMainWindow):
                 screen_width = screen_size.width()
                 screen_height = screen_size.height()
 
-            # Calculate scaling to show entire image (maintain aspect ratio)
+            # Calculate scaling based on whether this is background or regular media
             img_width, img_height = pil_image.size
-            scale = min(screen_width / img_width, screen_height / img_height)
+            if is_background:
+                # Background: fill entire screen (may crop)
+                scale = max(screen_width / img_width, screen_height / img_height)
+            else:
+                # Regular media: show entire image (may have black bars)
+                scale = min(screen_width / img_width, screen_height / img_height)
 
             new_width = int(img_width * scale)
             new_height = int(img_height * scale)
 
             # Resize with HIGHEST quality (LANCZOS/ANTIALIAS)
             pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
+
+            # Center crop if background and image is larger than screen
+            if is_background and (new_width > screen_width or new_height > screen_height):
+                left = (new_width - screen_width) // 2
+                top = (new_height - screen_height) // 2
+                right = left + screen_width
+                bottom = top + screen_height
+                pil_image = pil_image.crop((left, top, right, bottom))
 
             # Convert to QPixmap with high quality
             img_array = np.array(pil_image)
@@ -373,7 +386,7 @@ class AdPlayerWindow(QMainWindow):
         else:
             # Direct play if already faded
             if is_image:
-                self.display_image(filepath, duration)
+                self.display_image(filepath, duration, is_background=False)
             else:
                 self.display_video(filepath, duration)
             self.fade_in()
@@ -440,13 +453,13 @@ class AdPlayerWindow(QMainWindow):
             if cmd['type'] == 'play':
                 # Switch to new content
                 if cmd['is_image']:
-                    self.display_image(cmd['file'], cmd['duration'])
+                    self.display_image(cmd['file'], cmd['duration'], is_background=False)
                 else:
                     self.display_video(cmd['file'], cmd['duration'])
                 self.fade_in()
             elif cmd['type'] == 'background':
                 # Return to background
-                self.display_image(self.background_image, 0)
+                self.display_image(self.background_image, 0, is_background=True)
                 self.fade_in()
 
         self.is_transitioning = False
