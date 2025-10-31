@@ -26,9 +26,75 @@ export QT_QPA_PLATFORM_PLUGIN_PATH=""
 export QT_DEBUG_PLUGINS=0
 unset QT_PLUGIN_PATH
 
-# Ensure DISPLAY is set
+# Ensure DISPLAY is set (default to physical :0)
 if [ -z "${DISPLAY:-}" ]; then
     export DISPLAY=:0
+fi
+
+# If running as root from cron, wire this process to the active desktop session
+if [ "$(id -u)" -eq 0 ]; then
+    # Try to detect the active graphical user (seat0) and its UID
+    DESKTOP_USER=""
+    DESKTOP_UID=""
+
+    if command -v loginctl >/dev/null 2>&1; then
+        # Pick the first active session on seat0 (common for local console)
+        SESSION_LINE="$(loginctl list-sessions --no-legend 2>/dev/null | awk '$3=="seat0" && $2!="" {print; exit}')"
+        if [ -n "$SESSION_LINE" ]; then
+            DESKTOP_UID="$(echo "$SESSION_LINE" | awk '{print $2}')"
+            DESKTOP_USER="$(id -nu "$DESKTOP_UID" 2>/dev/null || true)"
+        fi
+        # Fallback: take any active session
+        if [ -z "$DESKTOP_USER" ]; then
+            SESSION_LINE="$(loginctl list-sessions --no-legend 2>/dev/null | awk '$1!="" {print; exit}')"
+            if [ -n "$SESSION_LINE" ]; then
+                DESKTOP_UID="$(echo "$SESSION_LINE" | awk '{print $2}')"
+                DESKTOP_USER="$(id -nu "$DESKTOP_UID" 2>/dev/null || true)"
+            fi
+        fi
+    fi
+
+    # Additional fallbacks when loginctl isn't helpful
+    if [ -z "$DESKTOP_USER" ]; then
+        # User owning the console often maps to the active desktop user
+        if [ -e /dev/console ]; then
+            DESKTOP_USER="$(stat -c '%U' /dev/console 2>/dev/null || true)"
+        fi
+    fi
+    if [ -n "$DESKTOP_USER" ] && [ -z "$DESKTOP_UID" ]; then
+        DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || true)"
+    fi
+
+    # Wire X11 auth to the desktop user's authority cookie
+    if [ -z "${XAUTHORITY:-}" ] && [ -n "$DESKTOP_USER" ]; then
+        # Common location
+        if [ -f "/home/$DESKTOP_USER/.Xauthority" ]; then
+            export XAUTHORITY="/home/$DESKTOP_USER/.Xauthority"
+        fi
+        # Snap/Ubuntu variants sometimes place it under XDG_RUNTIME_DIR
+        if [ -z "${XAUTHORITY:-}" ] && [ -n "$DESKTOP_UID" ] && [ -f "/run/user/$DESKTOP_UID/gdm/Xauthority" ]; then
+            export XAUTHORITY="/run/user/$DESKTOP_UID/gdm/Xauthority"
+        fi
+    fi
+
+    # Set XDG runtime and DBus session (needed by many desktops)
+    if [ -n "$DESKTOP_UID" ]; then
+        export XDG_RUNTIME_DIR="/run/user/$DESKTOP_UID"
+        if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "/run/user/$DESKTOP_UID/bus" ]; then
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DESKTOP_UID/bus"
+        fi
+    fi
+
+    # Force Qt to use X11/XWayland when DISPLAY is present
+    if [ -n "${DISPLAY:-}" ]; then
+        export QT_QPA_PLATFORM="xcb"
+    fi
+
+    # Helpful diagnostics (only when interactive shell has a TTY)
+    if [ -t 1 ]; then
+        echo "Running as root; bound to desktop user: ${DESKTOP_USER:-unknown} (UID: ${DESKTOP_UID:-?})"
+        echo "DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset} DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unset}"
+    fi
 fi
 
 # Function to show usage
