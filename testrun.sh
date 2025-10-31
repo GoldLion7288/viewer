@@ -46,10 +46,10 @@ echo "[$SERVICE_NAME] Starting playlist using: $LAUNCHER"
 "$LAUNCHER" start "$BG"
 
 # Example playlist; adjust files/durations to your needs
-"$LAUNCHER" play "${DATA_DIR}test1.mp4" 5
-"$LAUNCHER" play "${DATA_DIR}test2.mp4" 8
-"$LAUNCHER" play "${DATA_DIR}test3.mp4" 10
-"$LAUNCHER" play "${DATA_DIR}test4.mp4" 10
+"$LAUNCHER" play "${DATA_DIR}test1.mp4" 20
+"$LAUNCHER" play "${DATA_DIR}test2.mp4" 20
+"$LAUNCHER" play "${DATA_DIR}test3.mp4" 20
+"$LAUNCHER" play "${DATA_DIR}test4.mp4" 20
 
 # Return to background and then cleanly exit
 "$LAUNCHER" stop
