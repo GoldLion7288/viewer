@@ -12,6 +12,18 @@ from PIL import Image
 import numpy as np
 import threading
 
+# GStreamer imports for hardware-accelerated playback
+try:
+    import gi
+    gi.require_version('Gst', '1.0')
+    from gi.repository import Gst, GLib
+    Gst.init(None)
+    GSTREAMER_AVAILABLE = True
+    print("GStreamer loaded - hardware-accelerated playback enabled")
+except ImportError:
+    GSTREAMER_AVAILABLE = False
+    print("GStreamer not available - falling back to ffpyplayer")
+
 
 # ===================================
 # RASPBERRY PI PERFORMANCE OPTIMIZATION
@@ -27,7 +39,7 @@ if RASPBERRY_PI_MODE:
     # Sleep between frames - 0 for maximum performance
     PLAYBACK_SLEEP = 0.0001  # Minimal sleep (100 microseconds)
     # Target FPS for smooth playback (used in fallback path)
-    TARGET_FPS = 22  # Smooth framerate for Pi
+    TARGET_FPS = 23  # Smooth framerate for Pi
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
 else:
@@ -231,6 +243,158 @@ class VideoThread(QThread):
             except Exception as e:
                 print(f"Error stopping MediaPlayer: {e}")
             self.media_player = None
+
+
+class GStreamerVideoPlayer(QThread):
+    """Hardware-accelerated video player using GStreamer"""
+    frame_ready = pyqtSignal(np.ndarray)
+    playback_finished = pyqtSignal(np.ndarray)
+
+    def __init__(self, video_path, duration):
+        super().__init__()
+        self.video_path = video_path
+        self.duration = duration
+        self.running = True
+        self.pipeline = None
+        self.last_frame = None
+        self.loop = None
+
+    def run(self):
+        """Run GStreamer pipeline with hardware acceleration"""
+        import time
+
+        # Create GStreamer pipeline with hardware decoder
+        pipeline_str = self._build_pipeline()
+
+        try:
+            self.pipeline = Gst.parse_launch(pipeline_str)
+
+            # Get appsink element
+            appsink = self.pipeline.get_by_name('sink')
+            appsink.set_property('emit-signals', True)
+            appsink.set_property('max-buffers', 2)
+            appsink.set_property('drop', True)
+            appsink.set_property('sync', True)
+
+            # Connect to new-sample signal
+            appsink.connect('new-sample', self._on_new_sample)
+
+            # Start playback
+            self.pipeline.set_state(Gst.State.PLAYING)
+
+            # Run GLib main loop with duration limit
+            start_time = time.time()
+            while self.running:
+                # Check duration limit
+                if self.duration > 0:
+                    elapsed = time.time() - start_time
+                    if elapsed >= self.duration:
+                        break
+
+                # Small sleep to avoid busy loop
+                time.sleep(0.01)
+
+                # Check if pipeline is still playing
+                state = self.pipeline.get_state(0).state
+                if state == Gst.State.NULL:
+                    break
+
+            # Cleanup
+            self.pipeline.set_state(Gst.State.NULL)
+
+        except Exception as e:
+            print(f"GStreamer error: {e}")
+
+        # Send last frame with finished signal
+        if self.last_frame is not None:
+            self.playback_finished.emit(self.last_frame)
+        else:
+            self.playback_finished.emit(np.array([]))
+
+    def _build_pipeline(self):
+        """Build GStreamer pipeline with hardware acceleration for Raspberry Pi"""
+        # Detect Raspberry Pi hardware decoder
+        # Pi 4/5: v4l2h264dec (V4L2 hardware decoder)
+        # Pi 3 and earlier: omxh264dec (OpenMAX hardware decoder)
+        # Fallback: avdec_h264 (software decoder)
+
+        decoder = 'avdec_h264'  # Default software fallback
+
+        if RASPBERRY_PI_MODE:
+            # Try to detect which decoder is available
+            # Priority: v4l2h264dec > omxh264dec > avdec_h264
+            try:
+                # Check for V4L2 decoder (Pi 4/5)
+                if Gst.ElementFactory.find('v4l2h264dec'):
+                    decoder = 'v4l2h264dec'
+                    print("Using V4L2 hardware H.264 decoder (Pi 4/5)")
+                # Check for OMX decoder (Pi 3 and earlier)
+                elif Gst.ElementFactory.find('omxh264dec'):
+                    decoder = 'omxh264dec'
+                    print("Using OMX hardware H.264 decoder (Pi 3)")
+                else:
+                    print("Hardware decoder not found, using software decoder")
+            except Exception as e:
+                print(f"Decoder detection error: {e}, using software decoder")
+
+        # Build pipeline
+        # filesrc: Read file
+        # decodebin: Auto-detect format and decode
+        # videoconvert: Convert to RGB
+        # videoscale: Hardware-accelerated scaling
+        # appsink: Output to application
+
+        pipeline = (
+            f'filesrc location="{self.video_path}" ! '
+            f'decodebin name=dec ! '
+            f'videoconvert ! '
+            f'video/x-raw,format=RGB ! '
+            f'appsink name=sink '
+        )
+
+        return pipeline
+
+    def _on_new_sample(self, appsink):
+        """Callback when new frame is available"""
+        try:
+            sample = appsink.emit('pull-sample')
+            if sample:
+                buffer = sample.get_buffer()
+                caps = sample.get_caps()
+
+                # Get frame dimensions
+                structure = caps.get_structure(0)
+                width = structure.get_value('width')
+                height = structure.get_value('height')
+
+                # Extract frame data
+                success, map_info = buffer.map(Gst.MapFlags.READ)
+                if success:
+                    # Convert to numpy array
+                    frame_data = np.ndarray(
+                        shape=(height, width, 3),
+                        dtype=np.uint8,
+                        buffer=map_info.data
+                    )
+
+                    # Copy frame (important! otherwise buffer gets freed)
+                    frame_copy = frame_data.copy()
+                    self.last_frame = frame_copy
+
+                    # Emit to main thread
+                    self.frame_ready.emit(frame_copy)
+
+                    buffer.unmap(map_info)
+        except Exception as e:
+            print(f"Frame processing error: {e}")
+
+        return Gst.FlowReturn.OK
+
+    def stop(self):
+        """Stop playback"""
+        self.running = False
+        if self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
 
 
 class IPCServerThread(QThread):
@@ -455,17 +619,24 @@ class AdPlayerWindow(QMainWindow):
             print(f"Error displaying image {image_path}: {e}")
 
     def display_video(self, video_path, duration):
-        """Display video with high quality"""
+        """Display video with hardware acceleration if available"""
         try:
             # Stop any running video thread
             if self.video_thread and self.video_thread.isRunning():
                 self.video_thread.stop()
                 self.video_thread.wait()
 
-            # Create and start video thread
-            self.video_thread = VideoThread(video_path, duration)
+            # Use GStreamer for hardware acceleration if available
+            if GSTREAMER_AVAILABLE:
+                print(f"Playing with GStreamer (hardware-accelerated): {video_path}")
+                self.video_thread = GStreamerVideoPlayer(video_path, duration)
+            else:
+                print(f"Playing with ffpyplayer (software): {video_path}")
+                self.video_thread = VideoThread(video_path, duration)
+
             self.video_thread.frame_ready.connect(self.update_frame)
             self.video_thread.playback_finished.connect(self.on_video_finished)
+
             # Start with higher priority for smoother playback
             try:
                 self.video_thread.start(QThread.TimeCriticalPriority)

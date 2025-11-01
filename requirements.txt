@@ -17,3 +17,10 @@ numpy>=1.24.0
 # Audio/Video Synchronization - FFmpeg Python bindings for unified A/V decoding
 # This provides PERFECT synchronization by decoding both streams together
 ffpyplayer>=4.3.5
+
+# GStreamer Python bindings - Hardware-accelerated video playback (RECOMMENDED for Raspberry Pi)
+# Provides GPU decoding, better performance, and lower CPU usage
+# Install system packages: sudo apt-get install python3-gst-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-tools
+# For Raspberry Pi 4/5: sudo apt-get install gstreamer1.0-libav
+# For Raspberry Pi 3: sudo apt-get install gstreamer1.0-omx
+PyGObject>=3.42.0
