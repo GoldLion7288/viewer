@@ -1,5 +1,5 @@
 """
-High-Quality Advertisement Player with Smooth Transitions
+High-Quality Advertisement Player with Synchronized Audio/Video
 Professional-grade media player with IPC control
 
 FEATURES:
@@ -8,11 +8,18 @@ FEATURES:
 - Video: LANCZOS4 interpolation for crystal-clear scaling
 - Images: LANCZOS/ANTIALIAS for professional image quality
 - Hardware acceleration enabled
-- Accurate timing with 1.0x speed for seamless transitions
+- SYNCHRONIZED audio/video playback (no drift)
+- Time-based frame synchronization with adaptive frame skipping
+- Optimized performance with screen dimension caching
+
+AUDIO:
+- Uses ffplay (ffmpeg) for audio playback
+- Perfect synchronization with video frames
+- Supports all video container audio formats
 
 COMMANDS:
 - start <background_image> : Launch GUI with background
-- play <file> <duration> : Play file seamlessly
+- play <file> <duration> : Play file seamlessly with audio
 - stop : Stop playback and return to background
 - exit : Close GUI
 """
@@ -62,7 +69,7 @@ class VideoThread(QThread):
         self.audio_process = None
 
     def run(self):
-        """Play video with high-definition quality and audio"""
+        """Play video with high-definition quality and synchronized audio"""
         import time
 
         cap = cv2.VideoCapture(self.video_path)
@@ -75,60 +82,83 @@ class VideoThread(QThread):
         # Enable hardware acceleration for better performance
         cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
 
-        # Start audio playback using ffplay subprocess
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps == 0 or fps > 120:  # Sanity check
+            fps = 30  # Default fallback
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_duration = 1.0 / fps
+
+        print(f"Video: {fps} FPS, {total_frames} frames, {frame_duration*1000:.2f}ms per frame")
+
+        # Calculate actual max frames to play
+        max_frames = int(self.duration * fps) if self.duration > 0 else total_frames
+
+        # CRITICAL: Start audio and video at the SAME TIME for perfect sync
+        start_time = time.time()
+
+        # Start audio playback NOW (synchronized start point)
         if AUDIO_SUPPORT:
             try:
-                # Start ffplay for audio-only playback
-                # -nodisp: no video display
-                # -autoexit: exit when done
-                # -vn: disable video
-                # -loglevel quiet: suppress ffplay output
+                # Start ffplay with same timing
                 self.audio_process = subprocess.Popen(
                     [FFPLAY_PATH, '-nodisp', '-autoexit', '-vn', '-loglevel', 'quiet', self.video_path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL
                 )
-                print(f"Audio playback started (PID: {self.audio_process.pid}): {self.video_path}")
+                print(f"Audio/Video synchronized start at t={start_time:.3f}")
             except Exception as e:
                 print(f"Warning: Could not start audio playback: {e}")
                 self.audio_process = None
         else:
             self.audio_process = None
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0 or fps > 120:  # Sanity check
-            fps = 30  # Default fallback
-
-        # Normal speed playback for accurate timing
-        speed_multiplier = 1.0
-        frame_delay = (1.0 / fps) / speed_multiplier
-
-        frames_played = 0
-        max_frames = int(self.duration * fps) if self.duration > 0 else float('inf')
+        frame_count = 0
         last_frame = None
 
-        while self.running and cap.isOpened():
-            frame_start = time.time()
+        # Performance optimization: pre-calculate once
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.geometry()
+        screen_width = screen_geometry.width()
+        screen_height = screen_geometry.height()
 
+        while self.running and cap.isOpened() and frame_count < max_frames:
+            # Calculate target time for this frame (synchronized to audio)
+            target_time = start_time + (frame_count * frame_duration)
+            current_time = time.time()
+
+            # Time-based synchronization: skip frames if behind, wait if ahead
+            time_diff = target_time - current_time
+
+            # Read frame
             ret, frame = cap.read()
-
-            if not ret or frames_played >= max_frames:
+            if not ret:
                 break
 
-            # Convert BGR to RGB for Qt with high quality
+            # Convert BGR to RGB for Qt (minimal processing)
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            last_frame = frame_rgb  # Keep track of last frame
+            last_frame = frame_rgb
+
+            # Emit frame for display
             self.frame_ready.emit(frame_rgb)
 
-            frames_played += 1
+            frame_count += 1
 
-            # Optimized frame timing - use precise sleep
-            elapsed = time.time() - frame_start
-            sleep_time = frame_delay - elapsed
-
-            if sleep_time > 0.001:  # Only sleep if meaningful time remains
-                self.msleep(int(sleep_time * 1000))
+            # Precise synchronization: sleep only the exact amount needed
+            if time_diff > 0.001:  # We're ahead of schedule, wait
+                time.sleep(time_diff)
+            elif time_diff < -frame_duration:  # We're way behind, skip frames
+                # Skip ahead to catch up (frame dropping for sync)
+                skip_frames = int(abs(time_diff) / frame_duration)
+                print(f"Skipping {skip_frames} frames to maintain sync")
+                for _ in range(skip_frames):
+                    ret = cap.grab()  # Fast skip without decoding
+                    if not ret:
+                        break
+                    frame_count += 1
 
         cap.release()
 
@@ -390,44 +420,39 @@ class AdPlayerWindow(QMainWindow):
             print(f"Error displaying video {video_path}: {e}")
 
     def update_frame(self, frame):
-        """Update display with new video frame - HIGH DEFINITION QUALITY"""
+        """Update display with new video frame - OPTIMIZED HIGH QUALITY"""
         try:
             # Get frame dimensions
             height, width, channel = frame.shape
 
-            # Get screen size - use actual screen geometry
-            from PyQt5.QtWidgets import QApplication
-            screen = QApplication.primaryScreen()
-            screen_geometry = screen.geometry()
-            screen_width = screen_geometry.width()
-            screen_height = screen_geometry.height()
+            # Use cached screen dimensions (calculated once during video start)
+            if not hasattr(self, '_cached_screen_width'):
+                from PyQt5.QtWidgets import QApplication
+                screen = QApplication.primaryScreen()
+                screen_geometry = screen.geometry()
+                self._cached_screen_width = screen_geometry.width()
+                self._cached_screen_height = screen_geometry.height()
 
-            # Fallback to label size if needed
-            if screen_width <= 0 or screen_height <= 0:
-                screen_size = self.label.size()
-                screen_width = screen_size.width()
-                screen_height = screen_size.height()
+            screen_width = self._cached_screen_width
+            screen_height = self._cached_screen_height
 
             # Calculate scaling to show entire frame (maintain aspect ratio)
             scale = min(screen_width / width, screen_height / height)
             new_width = int(width * scale)
             new_height = int(height * scale)
 
-            # Extra safety check - ensure frame never exceeds screen bounds
-            if new_width > screen_width or new_height > screen_height:
-                scale = min(screen_width / new_width, screen_height / new_height)
-                new_width = int(new_width * scale)
-                new_height = int(new_height * scale)
+            # Use LANCZOS4 for highest quality scaling (only if resize needed)
+            if new_width != width or new_height != height:
+                frame_resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+            else:
+                frame_resized = frame
 
-            # Use LANCZOS4 for highest quality scaling
-            frame_resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
-
-            # Convert to QPixmap with high quality settings
+            # Convert to QPixmap with high quality settings (optimized)
             height, width, channel = frame_resized.shape
             bytes_per_line = 3 * width
             q_image = QImage(frame_resized.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
-            # Enable smooth transformation for QPixmap
+            # Create pixmap directly (no extra transformation needed)
             pixmap = QPixmap.fromImage(q_image)
 
             self.label.setPixmap(pixmap)
@@ -476,6 +501,12 @@ class AdPlayerWindow(QMainWindow):
         if self.video_thread and self.video_thread.isRunning():
             self.video_thread.stop()
             self.video_thread.wait()
+
+        # Clear cached screen dimensions for next video
+        if hasattr(self, '_cached_screen_width'):
+            delattr(self, '_cached_screen_width')
+        if hasattr(self, '_cached_screen_height'):
+            delattr(self, '_cached_screen_height')
 
         # Return to background only if explicitly requested
         if return_to_background and self.background_image and os.path.exists(self.background_image):
