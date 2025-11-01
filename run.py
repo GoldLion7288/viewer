@@ -29,26 +29,35 @@ from PyQt5.QtGui import QPixmap, QImage
 import cv2
 from PIL import Image
 import numpy as np
+import pygame
+import threading
 
 
 # IPC Configuration
 IPC_SOCKET_PATH = '/tmp/video_player_ipc.sock'
 IPC_PORT = 45678
 
+# Initialize pygame mixer for audio playback
+pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+
 
 class VideoThread(QThread):
-    """Thread for video playback"""
+    """Thread for video playback with audio support"""
     frame_ready = pyqtSignal(np.ndarray)
     playback_finished = pyqtSignal(np.ndarray)  # Send last frame with signal
+
+    # Class-level lock for audio control
+    audio_lock = threading.Lock()
 
     def __init__(self, video_path, duration=0):
         super().__init__()
         self.video_path = video_path
         self.duration = duration
         self.running = True
+        self.audio_loaded = False
 
     def run(self):
-        """Play video with high-definition quality"""
+        """Play video with high-definition quality and audio"""
         import time
 
         cap = cv2.VideoCapture(self.video_path)
@@ -60,6 +69,21 @@ class VideoThread(QThread):
 
         # Enable hardware acceleration for better performance
         cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+
+        # Load and play audio
+        try:
+            with VideoThread.audio_lock:
+                # Stop any currently playing audio
+                pygame.mixer.music.stop()
+                # Load audio from video file
+                pygame.mixer.music.load(self.video_path)
+                # Play audio (loops=-1 means no loop, just play once)
+                pygame.mixer.music.play(loops=0)
+                self.audio_loaded = True
+                print(f"Audio loaded and playing: {self.video_path}")
+        except Exception as e:
+            print(f"Warning: Could not load audio from {self.video_path}: {e}")
+            self.audio_loaded = False
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps == 0 or fps > 120:  # Sanity check
@@ -97,6 +121,15 @@ class VideoThread(QThread):
 
         cap.release()
 
+        # Stop audio when video finishes
+        if self.audio_loaded:
+            try:
+                with VideoThread.audio_lock:
+                    pygame.mixer.music.stop()
+                    print("Audio playback stopped (video finished)")
+            except Exception as e:
+                print(f"Error stopping audio: {e}")
+
         # Send last frame with finished signal so it can be held cleanly
         if last_frame is not None:
             self.playback_finished.emit(last_frame)
@@ -104,8 +137,17 @@ class VideoThread(QThread):
             self.playback_finished.emit(np.array([]))
 
     def stop(self):
-        """Stop video playback"""
+        """Stop video and audio playback"""
         self.running = False
+
+        # Stop audio immediately
+        if self.audio_loaded:
+            try:
+                with VideoThread.audio_lock:
+                    pygame.mixer.music.stop()
+                    print("Audio playback stopped (manual stop)")
+            except Exception as e:
+                print(f"Error stopping audio: {e}")
 
 
 class IPCServerThread(QThread):
