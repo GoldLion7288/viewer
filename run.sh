@@ -119,25 +119,32 @@ if [ "$(id -u)" -eq 0 ]; then
     fi
 fi
 
-# Additional audio diagnostics (for all users)
+# Additional A/V sync diagnostics (for all users)
 if [ -t 1 ]; then
     echo ""
-    echo "🔊 Audio System Check:"
+    echo "🎬 Audio/Video Sync Check:"
 
-    # Check if ffplay is available
-    if command -v ffplay >/dev/null 2>&1; then
-        echo "  ✓ ffplay found: $(which ffplay)"
+    # Check if ffpyplayer is available
+    if $PYTHON_CMD -c "from ffpyplayer.player import MediaPlayer" 2>/dev/null; then
+        echo "  ✓ ffpyplayer: READY (unified A/V decoder for perfect sync)"
     else
-        echo "  ✗ ffplay NOT found - install with: sudo apt install ffmpeg"
+        echo "  ✗ ffpyplayer NOT available - install with: pip install ffpyplayer"
+        echo "    Video will play WITHOUT audio"
+    fi
+
+    # Check FFmpeg
+    if command -v ffmpeg >/dev/null 2>&1; then
+        echo "  ✓ ffmpeg found: $(which ffmpeg)"
+    else
+        echo "  ✗ ffmpeg NOT found - install with: sudo apt install ffmpeg"
     fi
 
     # Check PulseAudio
     if command -v pulseaudio >/dev/null 2>&1; then
-        echo "  ✓ PulseAudio found"
         if pgrep -x pulseaudio >/dev/null 2>&1; then
             echo "  ✓ PulseAudio is running"
         else
-            echo "  ⚠ PulseAudio not running"
+            echo "  ⚠ PulseAudio not running - audio may not work"
         fi
     fi
 

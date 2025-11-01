@@ -14,5 +14,6 @@ Pillow>=10.0.0
 # Numerical Computing - Array operations for video frames
 numpy>=1.24.0
 
-# Note: Audio playback uses ffplay (from ffmpeg package)
-# Install system package: sudo apt install ffmpeg
+# Audio/Video Synchronization - FFmpeg Python bindings for unified A/V decoding
+# This provides PERFECT synchronization by decoding both streams together
+ffpyplayer>=4.3.5

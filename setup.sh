@@ -2,8 +2,8 @@
 # ===========================================
 # 🎬 Raspberry Pi Video Player Setup Script
 # ===========================================
-# Dependencies: PyQt5, OpenCV, Pillow, NumPy, ffmpeg
-# Audio/Video: OpenCV for video + ffplay for audio
+# Dependencies: PyQt5, OpenCV, Pillow, NumPy, ffpyplayer
+# Audio/Video: ffpyplayer unified decoder for PERFECT synchronization
 
 set -euo pipefail
 
@@ -27,9 +27,11 @@ echo "   → Installing OpenCV system dependencies..."
 sudo apt install -y libgl1-mesa-glx libglib2.0-0 \
                     libavcodec-extra libavformat-dev libswscale-dev
 
-echo "   → Installing FFmpeg (includes ffplay for audio) and audio system..."
-sudo apt install -y ffmpeg pulseaudio pulseaudio-utils alsa-utils \
-                    libsdl2-2.0-0
+echo "   → Installing FFmpeg and SDL2 for synchronized audio/video playback..."
+sudo apt install -y ffmpeg libavformat-dev libavcodec-dev libavdevice-dev \
+                    libavutil-dev libswscale-dev libswresample-dev libavfilter-dev \
+                    libsdl2-dev libsdl2-2.0-0 \
+                    pulseaudio pulseaudio-utils alsa-utils
 
 echo "   → Installing X11 libraries for Qt GUI..."
 sudo apt install -y libxcb-xinerama0 libx11-xcb1 libxkbcommon-x11-0 libxcb-icccm4 \
@@ -47,8 +49,12 @@ source venv/bin/activate
 echo "   → Upgrading pip..."
 pip install --upgrade pip
 
-echo "   → Installing requirements (PyQt5, OpenCV, Pillow, NumPy)..."
+echo "   → Installing requirements (PyQt5, OpenCV, Pillow, NumPy, ffpyplayer)..."
 pip install -r requirements.txt
+
+echo ""
+echo "   → Verifying ffpyplayer installation..."
+python3 -c "from ffpyplayer.player import MediaPlayer; print('✓ ffpyplayer is working')" || echo "⚠ ffpyplayer installation failed"
 
 echo ""
 echo "🔑 Step 6: Making scripts executable..."
@@ -61,11 +67,12 @@ echo "✅ Setup complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "📦 Installed Python packages:"
-pip list | grep -E "PyQt5|opencv-python|Pillow|numpy"
+pip list | grep -E "PyQt5|opencv-python|Pillow|numpy|ffpyplayer"
 
 echo ""
-echo "🔊 Audio system:"
-command -v ffplay >/dev/null 2>&1 && echo "  ✓ ffplay: $(ffplay -version | head -n1)" || echo "  ✗ ffplay not found"
+echo "🎬 Audio/Video Sync System:"
+python3 -c "from ffpyplayer.player import MediaPlayer; print('  ✓ ffpyplayer: READY (unified A/V decoder)')" 2>/dev/null || echo "  ✗ ffpyplayer: NOT INSTALLED"
+command -v ffmpeg >/dev/null 2>&1 && echo "  ✓ ffmpeg: $(ffmpeg -version | head -n1 | cut -d' ' -f3)" || echo "  ✗ ffmpeg not found"
 pgrep -x pulseaudio >/dev/null 2>&1 && echo "  ✓ PulseAudio is running" || echo "  ⚠ PulseAudio not running"
 echo ""
 echo "📝 Next steps:"
