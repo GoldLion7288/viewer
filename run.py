@@ -35,6 +35,13 @@ except ImportError:
 # Set to True for Raspberry Pi (enables all optimizations)
 RASPBERRY_PI_MODE = False  # Changed to False for maximum quality on desktop/PC
 
+# ===================================
+# GSTREAMER AUDIO CONFIGURATION
+# ===================================
+# If GStreamer audio causes errors, set this to False to use video-only mode with GStreamer
+# When False, audio will be handled by ffpyplayer fallback if available
+GSTREAMER_ENABLE_AUDIO = True  # Set to False if you experience GStreamer audio errors
+
 # Performance settings for Raspberry Pi
 if RASPBERRY_PI_MODE:
     # Use INTER_AREA for better quality with good performance (better than NEAREST)
@@ -94,6 +101,8 @@ else:
     print(f"  - OpenCV Threads: {cv2.getNumThreads()} (all CPU cores)")
 print(f"Scaling Mode: {SCALING_MODE} (preserves aspect ratio)")
 print(f"GStreamer Available: {GSTREAMER_AVAILABLE}")
+if GSTREAMER_AVAILABLE:
+    print(f"  - GStreamer Audio: {'ENABLED' if GSTREAMER_ENABLE_AUDIO else 'DISABLED (video only)'}")
 print(f"Audio Support (ffpyplayer): {SYNC_SUPPORT}")
 print("=" * 60 + "\n")
 
@@ -287,10 +296,11 @@ class GStreamerVideoPlayer(QThread):
     frame_ready = pyqtSignal(np.ndarray)
     playback_finished = pyqtSignal(np.ndarray)
 
-    def __init__(self, video_path, duration):
+    def __init__(self, video_path, duration, enable_audio=True):
         super().__init__()
         self.video_path = video_path
         self.duration = duration
+        self.enable_audio = enable_audio
         self.running = True
         self.pipeline = None
         self.last_frame = None
@@ -413,16 +423,31 @@ class GStreamerVideoPlayer(QThread):
         except Exception as e:
             print(f"Audio sink detection warning: {e}")
 
-        pipeline = (
-            f'filesrc location="{self.video_path}" ! '
-            f'decodebin name=dec '
-            # Video path: decode → convert → app (maximum quality)
-            f'dec. ! videoconvert ! video/x-raw,format=RGB ! appsink name=sink emit-signals=true max-buffers=2 drop=false sync=true '
-            # Audio path: decode → convert → resample → volume → speakers (enhanced pipeline)
-            f'dec. ! audioconvert ! audioresample ! volume volume=1.0 ! {audio_sink} sync=true'
-        )
+        # Build pipeline based on audio preference
+        if self.enable_audio:
+            # Full pipeline with BOTH video and audio
+            # Using decodebin with queue for better buffering
+            pipeline = (
+                f'filesrc location="{self.video_path}" ! '
+                f'decodebin name=dec '
+                # Video path: decode → queue → convert → app (maximum quality)
+                f'dec. ! queue max-size-buffers=2 ! videoconvert ! video/x-raw,format=RGB ! '
+                f'appsink name=sink emit-signals=true max-buffers=2 drop=false sync=true '
+                # Audio path: decode → queue → convert → resample → volume → speakers
+                f'dec. ! queue max-size-buffers=100 ! audioconvert ! audioresample ! '
+                f'volume volume=1.0 ! {audio_sink}'
+            )
+            print(f"GStreamer pipeline (with audio): {pipeline}")
+        else:
+            # Video-only pipeline (no audio)
+            pipeline = (
+                f'filesrc location="{self.video_path}" ! '
+                f'decodebin ! queue max-size-buffers=2 ! videoconvert ! '
+                f'video/x-raw,format=RGB ! appsink name=sink emit-signals=true '
+                f'max-buffers=2 drop=false sync=false'
+            )
+            print(f"GStreamer pipeline (video only, no audio): {pipeline}")
 
-        print(f"GStreamer pipeline: {pipeline}")
         return pipeline
 
     def _on_new_sample(self, appsink):
@@ -719,8 +744,11 @@ class AdPlayerWindow(QMainWindow):
 
             # Prefer GStreamer when available (A/V sync + hardware acceleration)
             if GSTREAMER_AVAILABLE:
-                print(f"Playing with GStreamer (hardware-accelerated): {video_path}")
-                self.video_thread = GStreamerVideoPlayer(video_path, duration)
+                if GSTREAMER_ENABLE_AUDIO:
+                    print(f"Playing with GStreamer (hardware-accelerated + audio): {video_path}")
+                else:
+                    print(f"Playing with GStreamer (hardware-accelerated, video only): {video_path}")
+                self.video_thread = GStreamerVideoPlayer(video_path, duration, enable_audio=GSTREAMER_ENABLE_AUDIO)
                 backend_selected = True
 
             # Otherwise use ffpyplayer if available (unified A/V decoder)
