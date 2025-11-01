@@ -27,7 +27,7 @@ if RASPBERRY_PI_MODE:
     # Sleep between frames - 0 for maximum performance
     PLAYBACK_SLEEP = 0.0001  # Minimal sleep (100 microseconds)
     # Target FPS for smooth playback (used in fallback path)
-    TARGET_FPS = 30  # Smooth framerate for Pi
+    TARGET_FPS = 25  # Smooth framerate for Pi
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
 else:
