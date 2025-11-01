@@ -337,19 +337,23 @@ class GStreamerVideoPlayer(QThread):
             except Exception as e:
                 print(f"Decoder detection error: {e}, using software decoder")
 
-        # Build pipeline
-        # filesrc: Read file
-        # decodebin: Auto-detect format and decode
-        # videoconvert: Convert to RGB
-        # videoscale: Hardware-accelerated scaling
-        # appsink: Output to application
+        # Build pipeline with BOTH video and audio
+        # Architecture:
+        #   filesrc → decodebin → video: videoconvert → appsink (to PyQt)
+        #                      → audio: audioconvert → autoaudiosink (to speakers)
+        #
+        # This provides:
+        # - Hardware-accelerated H.264 video decoding
+        # - Synchronized audio playback through system audio
+        # - Perfect A/V sync maintained by GStreamer
 
         pipeline = (
             f'filesrc location="{self.video_path}" ! '
-            f'decodebin name=dec ! '
-            f'videoconvert ! '
-            f'video/x-raw,format=RGB ! '
-            f'appsink name=sink '
+            f'decodebin name=dec '
+            # Video path: decode → convert → app
+            f'dec. ! videoconvert ! video/x-raw,format=RGB ! appsink name=sink '
+            # Audio path: decode → convert → speakers
+            f'dec. ! audioconvert ! audioresample ! autoaudiosink'
         )
 
         return pipeline
