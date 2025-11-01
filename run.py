@@ -91,22 +91,24 @@ RASPBERRY_PI_MODE = True
 if RASPBERRY_PI_MODE:
     # Use NEAREST neighbor for maximum speed (fastest interpolation)
     FRAME_INTERPOLATION = cv2.INTER_NEAREST  # Fastest - good for Pi
-    # Maximum frame processing time before skipping (seconds)
-    MAX_FRAME_TIME = 0.033  # ~30fps (33ms per frame)
-    # Sleep between frames (reduce CPU usage)
-    PLAYBACK_SLEEP = 0.001  # 1ms sleep
-    # Target FPS for smooth playback
-    TARGET_FPS = 30  # Limit to 30fps for smooth performance
-    print("Raspberry Pi Mode: ENABLED")
-    print("  - Interpolation: NEAREST (fastest)")
-    print("  - Target FPS: 30")
-    print("  - Display: VLC-like (fit screen, black bars)")
+    # Sleep between frames - 0 for maximum performance
+    PLAYBACK_SLEEP = 0.0001  # Minimal sleep (100 microseconds)
+    # Target FPS for smooth playback (24 = cinema standard, very smooth)
+    TARGET_FPS = 40  # Lower FPS = smoother on Pi
+    # Maximum display resolution (downscale if needed for performance)
+    MAX_DISPLAY_WIDTH = 1280  # 720p width (balance quality/performance)
+    MAX_DISPLAY_HEIGHT = 720  # 720p height
+    # Scaling behavior: 'fill' = fill screen (may crop), 'fit' = fit screen (black bars)
+    SCALING_MODE = 'fill'  # Fill screen to avoid narrow appearance
+
 else:
     # Desktop mode: highest quality
     FRAME_INTERPOLATION = cv2.INTER_LANCZOS4  # Highest quality
-    MAX_FRAME_TIME = 0.016  # ~60fps
     PLAYBACK_SLEEP = 0.001  # 1ms sleep
     TARGET_FPS = 60  # Full framerate
+    MAX_DISPLAY_WIDTH = 3840  # 4K
+    MAX_DISPLAY_HEIGHT = 2160
+    SCALING_MODE = 'fit'  # Fit screen with black bars
 
 # Audio/Video synchronization using ffpyplayer (unified decoder)
 try:
@@ -117,9 +119,6 @@ try:
         print("Raspberry Pi optimization mode: ENABLED")
 except ImportError:
     SYNC_SUPPORT = False
-    print("Warning: ffpyplayer not installed. Audio playback will be disabled.")
-    print("Install with: pip install ffpyplayer")
-    print("System deps: sudo apt install ffmpeg libsdl2-dev")
 
 # IPC Configuration
 IPC_SOCKET_PATH = '/tmp/video_player_ipc.sock'
@@ -165,8 +164,6 @@ class VideoThread(QThread):
                 })
 
             self.media_player = MediaPlayer(self.video_path, ff_opts=ff_opts)
-            print(f"MediaPlayer created: {self.video_path}")
-            print(f"Playback duration: {self.duration}s (0 = full video)")
 
         except Exception as e:
             print(f"Error creating MediaPlayer: {e}")
@@ -191,9 +188,7 @@ class VideoThread(QThread):
             frame_data, val = self.media_player.get_frame()
 
             if val == 'eof':
-                # End of file
-                print(f"Playback finished (EOF) - {frame_count} frames ({displayed_frames} displayed, {skipped_frames} skipped)")
-                break
+                    break
 
             if frame_data is None:
                 # No frame ready yet, wait a bit
@@ -537,11 +532,11 @@ class AdPlayerWindow(QMainWindow):
 
     def update_frame(self, frame):
         """
-        Update display with new video frame - VLC-LIKE BEHAVIOR
-        - Maintains aspect ratio
-        - Fills screen completely (with black bars if needed)
-        - No cropping - entire video visible
-        - Optimized for Raspberry Pi
+        Update display with new video frame - AGGRESSIVE RASPBERRY PI OPTIMIZATION
+        - FILL mode: Fills screen completely (may crop edges slightly)
+        - No black bars (video appears full width)
+        - Extremely fast (no canvas creation, minimal operations)
+        - 720p max resolution for performance
         """
         try:
             # Get frame dimensions
@@ -559,51 +554,81 @@ class AdPlayerWindow(QMainWindow):
             screen_width = self._cached_screen_width
             screen_height = self._cached_screen_height
 
-            # Calculate scaling to fit video in screen (maintain aspect ratio)
-            # This is the VLC behavior: fit entire video, add black bars if needed
-            if not hasattr(self, '_cached_scale'):
-                scale_width = screen_width / frame_width
-                scale_height = screen_height / frame_height
-                # Use minimum scale to ensure entire video fits
-                scale = min(scale_width, scale_height)
-
-                self._cached_scale = scale
-                self._cached_video_width = int(frame_width * scale)
-                self._cached_video_height = int(frame_height * scale)
-
-                # Calculate position to center video (black bars)
-                self._cached_x_offset = (screen_width - self._cached_video_width) // 2
-                self._cached_y_offset = (screen_height - self._cached_video_height) // 2
-
-                print(f"Video scaling: {frame_width}x{frame_height} -> {self._cached_video_width}x{self._cached_video_height}")
-                print(f"Black bars: left/right={self._cached_x_offset}px, top/bottom={self._cached_y_offset}px")
-                print(f"Interpolation: {'NEAREST (fastest)' if RASPBERRY_PI_MODE else 'LANCZOS4 (highest quality)'}")
-
-            # Resize video frame to fit screen (maintaining aspect ratio)
-            video_width = self._cached_video_width
-            video_height = self._cached_video_height
-
-            if video_width != frame_width or video_height != frame_height:
-                frame_resized = cv2.resize(frame, (video_width, video_height), interpolation=FRAME_INTERPOLATION)
+            # Apply max resolution limit for Raspberry Pi performance
+            if RASPBERRY_PI_MODE:
+                target_width = min(screen_width, MAX_DISPLAY_WIDTH)
+                target_height = min(screen_height, MAX_DISPLAY_HEIGHT)
             else:
-                frame_resized = frame
+                target_width = screen_width
+                target_height = screen_height
 
-            # Create black canvas (full screen size) - VLC-like behavior
-            canvas = np.zeros((screen_height, screen_width, 3), dtype=np.uint8)
+            # Calculate scaling based on mode
+            if not hasattr(self, '_cached_scale'):
+                if SCALING_MODE == 'fill':
+                    # FILL mode: Use MAXIMUM scale to fill screen (may crop)
+                    # This makes video appear full width, no black bars
+                    scale_width = target_width / frame_width
+                    scale_height = target_height / frame_height
+                    scale = max(scale_width, scale_height)  # Max = fill screen
 
-            # Place resized video in center of canvas (creates black bars automatically)
-            y_start = self._cached_y_offset
-            y_end = y_start + video_height
-            x_start = self._cached_x_offset
-            x_end = x_start + video_width
+                    self._cached_scale = scale
+                    scaled_width = int(frame_width * scale)
+                    scaled_height = int(frame_height * scale)
 
-            canvas[y_start:y_end, x_start:x_end] = frame_resized
+                    # Calculate crop offsets if video is larger than target
+                    self._cached_x_crop = max(0, (scaled_width - target_width) // 2)
+                    self._cached_y_crop = max(0, (scaled_height - target_height) // 2)
+                    self._cached_target_width = target_width
+                    self._cached_target_height = target_height
 
-            # Convert canvas to QPixmap (full screen image with video + black bars)
-            bytes_per_line = 3 * screen_width
-            q_image = QImage(canvas.data, screen_width, screen_height, bytes_per_line, QImage.Format_RGB888)
+                    print(f"FILL mode: {frame_width}x{frame_height} -> {target_width}x{target_height}")
+                    print(f"Scale: {scale:.2f}x, Crop: x={self._cached_x_crop}px, y={self._cached_y_crop}px")
+                else:
+                    # FIT mode: Use minimum scale (black bars may appear)
+                    scale_width = target_width / frame_width
+                    scale_height = target_height / frame_height
+                    scale = min(scale_width, scale_height)
 
-            # Create pixmap and display
+                    self._cached_scale = scale
+                    self._cached_target_width = int(frame_width * scale)
+                    self._cached_target_height = int(frame_height * scale)
+                    self._cached_x_crop = 0
+                    self._cached_y_crop = 0
+
+                    print(f"FIT mode: {frame_width}x{frame_height} -> {self._cached_target_width}x{self._cached_target_height}")
+
+                print(f"Interpolation: {'NEAREST (fastest)' if RASPBERRY_PI_MODE else 'LANCZOS4'}")
+
+            # Resize frame using cached dimensions
+            target_w = self._cached_target_width
+            target_h = self._cached_target_height
+
+            if SCALING_MODE == 'fill':
+                # FILL mode: Scale to larger size, then crop
+                scaled_w = int(frame_width * self._cached_scale)
+                scaled_h = int(frame_height * self._cached_scale)
+
+                if scaled_w != frame_width or scaled_h != frame_height:
+                    frame_scaled = cv2.resize(frame, (scaled_w, scaled_h), interpolation=FRAME_INTERPOLATION)
+                else:
+                    frame_scaled = frame
+
+                # Crop to target size (removes edges to fill screen)
+                x_crop = self._cached_x_crop
+                y_crop = self._cached_y_crop
+                frame_final = frame_scaled[y_crop:y_crop+target_h, x_crop:x_crop+target_w]
+            else:
+                # FIT mode: Simple resize
+                if target_w != frame_width or target_h != frame_height:
+                    frame_final = cv2.resize(frame, (target_w, target_h), interpolation=FRAME_INTERPOLATION)
+                else:
+                    frame_final = frame
+
+            # Convert directly to QPixmap (NO canvas creation, much faster)
+            h, w, ch = frame_final.shape
+            bytes_per_line = 3 * w
+            q_image = QImage(frame_final.data, w, h, bytes_per_line, QImage.Format_RGB888)
+
             pixmap = QPixmap.fromImage(q_image)
             self.label.setPixmap(pixmap)
 
@@ -654,8 +679,8 @@ class AdPlayerWindow(QMainWindow):
 
         # Clear all cached dimensions for next video
         for attr in ['_cached_screen_width', '_cached_screen_height', '_cached_scale',
-                     '_cached_video_width', '_cached_video_height',
-                     '_cached_x_offset', '_cached_y_offset']:
+                     '_cached_target_width', '_cached_target_height',
+                     '_cached_x_crop', '_cached_y_crop']:
             if hasattr(self, attr):
                 delattr(self, attr)
 
