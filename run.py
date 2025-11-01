@@ -115,7 +115,7 @@ class VideoThread(QThread):
             frame_data, val = self.media_player.get_frame()
 
             if val == 'eof':
-                    break
+                break
 
             if frame_data is None:
                 # No frame ready yet, wait a bit
@@ -126,7 +126,6 @@ class VideoThread(QThread):
             if self.duration > 0:
                 elapsed = time.time() - start_time
                 if elapsed >= self.duration:
-                    print(f"Playback finished (duration limit) - {elapsed:.2f}s")
                     break
 
             # Extract frame data
@@ -167,7 +166,6 @@ class VideoThread(QThread):
         if self.media_player:
             try:
                 self.media_player.close_player()
-                print("MediaPlayer closed cleanly")
             except Exception as e:
                 print(f"Error closing MediaPlayer: {e}")
             self.media_player = None
@@ -231,7 +229,6 @@ class VideoThread(QThread):
         if self.media_player:
             try:
                 self.media_player.close_player()
-                print("MediaPlayer stopped (manual stop)")
             except Exception as e:
                 print(f"Error stopping MediaPlayer: {e}")
             self.media_player = None
@@ -258,8 +255,6 @@ class IPCServerThread(QThread):
             self.server_socket.listen(5)
             self.server_socket.settimeout(1.0)  # Timeout for checking self.running
 
-            print(f"IPC Server listening on {IPC_SOCKET_PATH}")
-
             while self.running:
                 try:
                     client_socket, _ = self.server_socket.accept()
@@ -268,7 +263,6 @@ class IPCServerThread(QThread):
                     if data:
                         try:
                             command = json.loads(data)
-                            print(f"Received command: {command}")
                             self.command_received.emit(command)
 
                             # Send acknowledgment
@@ -498,7 +492,6 @@ class AdPlayerWindow(QMainWindow):
                 screen_geometry = screen.geometry()
                 self._cached_screen_width = screen_geometry.width()
                 self._cached_screen_height = screen_geometry.height()
-                print(f"Full screen size: {self._cached_screen_width}x{self._cached_screen_height}")
 
             screen_width = self._cached_screen_width
             screen_height = self._cached_screen_height
@@ -541,17 +534,9 @@ class AdPlayerWindow(QMainWindow):
                 self._cached_x_offset = (screen_width - self._cached_video_width) // 2
                 self._cached_y_offset = (screen_height - self._cached_video_height) // 2
 
-                print(f"QQ Player FIT mode (HIGH QUALITY):")
-                print(f"  Original: {frame_width}x{frame_height} (aspect: {original_aspect:.4f})")
-                print(f"  Scaled: {self._cached_video_width}x{self._cached_video_height} (aspect: {scaled_aspect:.4f})")
-                print(f"  Aspect ratio error: {aspect_error:.3f}% (target: <0.1%)")
-                print(f"  Scale factor: {scale:.3f}x")
-                print(f"  Black bars: x={self._cached_x_offset}px, y={self._cached_y_offset}px")
-                print(f"  Interpolation: INTER_AREA (high quality)")
-                print(f"  ✓ Aspect ratio PRECISELY preserved")
-
+                # Only print warning if aspect ratio error is significant
                 if aspect_error > 0.5:
-                    print(f"  WARNING: Aspect ratio error {aspect_error:.3f}% exceeds 0.5%!")
+                    print(f"WARNING: Aspect ratio error {aspect_error:.3f}% (target: <0.1%)")
 
             # Resize video to fit screen (PRESERVING aspect ratio)
             video_w = self._cached_video_width
@@ -601,8 +586,6 @@ class AdPlayerWindow(QMainWindow):
             print(f"Warning: File not found: {filepath}")
             return
 
-        print(f"Playing: {filepath} (duration: {duration}s)")
-
         # Stop current playback
         self.media_timer.stop()
 
@@ -630,8 +613,6 @@ class AdPlayerWindow(QMainWindow):
 
     def stop_playback(self, return_to_background=True):
         """Stop current playback and optionally return to background"""
-        print("Stopping playback...")
-
         # Stop timers
         self.media_timer.stop()
 
@@ -660,7 +641,6 @@ class AdPlayerWindow(QMainWindow):
         # Display the last frame as a static image to prevent freezing
         if last_frame is not None and last_frame.size > 0:
             self.update_frame(last_frame)
-            print("Video finished - holding last frame")
 
     def fade_in(self):
         """Fade in current content"""
@@ -825,14 +805,9 @@ def main():
         if is_instance_running():
             command = {'command': 'PLAY', 'file': filepath, 'duration': duration}
             if send_ipc_command(command):
-                print(f"Play command sent: {filepath}")
-
                 # Wait for exact playback duration + minimal transition buffer
-                # Duration (actual playback) + fade transitions (300ms) + safety margin (100ms)
                 wait_time = duration + 0.001
-                print(f"Waiting {wait_time}s for playback to complete...")
                 time.sleep(wait_time)
-                print(f"Playback completed")
             else:
                 print("Failed to send play command")
         else:
