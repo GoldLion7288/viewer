@@ -26,7 +26,7 @@ if RASPBERRY_PI_MODE:
     FRAME_INTERPOLATION = cv2.INTER_AREA  # Good quality + fast
     # Sleep between frames - 0 for maximum performance
     PLAYBACK_SLEEP = 0.0001  # Minimal sleep (100 microseconds)
-    # Target FPS for smooth playback
+    # Target FPS for smooth playback (used in fallback path)
     TARGET_FPS = 30  # Smooth framerate for Pi
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
@@ -36,6 +36,15 @@ else:
     PLAYBACK_SLEEP = 0.001  # 1ms sleep
     TARGET_FPS = 30  # Full framerate
     SCALING_MODE = 'fit'  # Fit screen with black bars
+
+# Enable OpenCV optimizations
+try:
+    cv2.setUseOptimized(True)
+    if RASPBERRY_PI_MODE:
+        # Fewer threads can reduce scheduling jitter on small CPUs
+        cv2.setNumThreads(1)
+except Exception:
+    pass
 
 # Audio/Video synchronization using ffpyplayer (unified decoder)
 try:
@@ -97,19 +106,13 @@ class VideoThread(QThread):
             self.playback_finished.emit(np.array([]))
             return
 
-        start_time = time.time()
+        start_time_monotonic = time.monotonic()
         last_frame = None
         frame_count = 0
-        displayed_frames = 0
-        skipped_frames = 0
-
-        # FPS limiting for Raspberry Pi
-        frame_interval = 1.0 / TARGET_FPS if RASPBERRY_PI_MODE else 0
-        last_display_time = time.time()
 
         # Main playback loop - MediaPlayer handles synchronization
         while self.running:
-            frame_start = time.time()
+            frame_start = time.monotonic()
 
             # Get next frame from MediaPlayer (includes audio sync)
             frame_data, val = self.media_player.get_frame()
@@ -121,12 +124,6 @@ class VideoThread(QThread):
                 # No frame ready yet, wait a bit
                 time.sleep(0.001)
                 continue
-
-            # Check duration limit
-            if self.duration > 0:
-                elapsed = time.time() - start_time
-                if elapsed >= self.duration:
-                    break
 
             # Extract frame data
             img, pts = frame_data
@@ -140,27 +137,29 @@ class VideoThread(QThread):
             last_frame = frame_rgb
             frame_count += 1
 
-            # FPS limiting for Raspberry Pi - skip frames if needed
-            if RASPBERRY_PI_MODE:
-                current_time = time.time()
-                time_since_last = current_time - last_display_time
-
-                # Only display frame if enough time has passed
-                if time_since_last >= frame_interval:
-                    self.frame_ready.emit(frame_rgb)
-                    displayed_frames += 1
-                    last_display_time = current_time
+            # PTS-based pacing for smooth, timestamp-accurate playback
+            # If pts is available, wait until wall clock reaches start + pts
+            try:
+                if pts is not None:
+                    target_time = start_time_monotonic + float(pts)
+                    now = time.monotonic()
+                    delay = target_time - now
+                    if delay > 0:
+                        # Sleep in short chunks to keep UI responsive
+                        time.sleep(min(delay, 0.02))
                 else:
-                    # Skip this frame to maintain target FPS
-                    skipped_frames += 1
-                    continue
-            else:
-                # Desktop mode: display all frames
-                self.frame_ready.emit(frame_rgb)
-                displayed_frames += 1
+                    # Fallback to tiny sleep to avoid busy loop
+                    time.sleep(PLAYBACK_SLEEP)
+            except Exception:
+                # Any timing issue: minimal sleep to avoid spin
+                time.sleep(PLAYBACK_SLEEP)
 
-            # Small sleep to prevent CPU spinning
-            time.sleep(PLAYBACK_SLEEP)
+            # If duration limit is set, stop once PTS exceeds it
+            if self.duration > 0 and pts is not None and pts >= self.duration:
+                break
+
+            # Emit frame after pacing
+            self.frame_ready.emit(frame_rgb)
 
         # Cleanup
         if self.media_player:
@@ -467,7 +466,11 @@ class AdPlayerWindow(QMainWindow):
             self.video_thread = VideoThread(video_path, duration)
             self.video_thread.frame_ready.connect(self.update_frame)
             self.video_thread.playback_finished.connect(self.on_video_finished)
-            self.video_thread.start()
+            # Start with higher priority for smoother playback
+            try:
+                self.video_thread.start(QThread.TimeCriticalPriority)
+            except Exception:
+                self.video_thread.start()
 
         except Exception as e:
             print(f"Error displaying video {video_path}: {e}")
