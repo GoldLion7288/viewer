@@ -27,15 +27,9 @@ if RASPBERRY_PI_MODE:
     # Sleep between frames - 0 for maximum performance
     PLAYBACK_SLEEP = 0.0001  # Minimal sleep (100 microseconds)
     # Target FPS for smooth playback
-    TARGET_FPS = 24  # Smooth framerate for Pi
+    TARGET_FPS = 23  # Smooth framerate for Pi
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
-    print("Raspberry Pi Mode: ENABLED (HIGH QUALITY)")
-    print("  - Interpolation: INTER_AREA (better quality)")
-    print("  - Target FPS: 30")
-    print("  - Scaling: FIT (QQ Player style - show all video)")
-    print("  - Resolution: Dynamic (full screen)")
-    print("  - Aspect Ratio: STRICTLY PRESERVED")
 else:
     # Desktop mode: highest quality
     FRAME_INTERPOLATION = cv2.INTER_LANCZOS4  # Highest quality
@@ -353,6 +347,16 @@ class AdPlayerWindow(QMainWindow):
         if self.background_image and os.path.exists(self.background_image):
             QTimer.singleShot(100, self.display_initial_background)
 
+    def _clear_video_layout_cache(self):
+        """Clear cached sizing to ensure correct aspect per media item."""
+        for attr in [
+            '_cached_screen_width', '_cached_screen_height', '_cached_scale',
+            '_cached_video_width', '_cached_video_height',
+            '_cached_x_offset', '_cached_y_offset'
+        ]:
+            if hasattr(self, attr):
+                delattr(self, attr)
+
     def display_initial_background(self):
         """Display initial background after window is fully initialized"""
         if self.background_image and os.path.exists(self.background_image):
@@ -611,10 +615,13 @@ class AdPlayerWindow(QMainWindow):
 
         # Fade out and switch
         if self.opacity_effect.opacity() > 0:
+            # Ensure fresh layout calc for next media
+            self._clear_video_layout_cache()
             self.pending_command = {'type': 'play', 'file': filepath, 'duration': duration, 'is_image': is_image}
             self.fade_out()
         else:
             # Direct play if already faded
+            self._clear_video_layout_cache()
             if is_image:
                 self.display_image(filepath, duration, is_background=False)
             else:
@@ -633,12 +640,8 @@ class AdPlayerWindow(QMainWindow):
             self.video_thread.stop()
             self.video_thread.wait()
 
-        # Clear all cached dimensions for next video
-        for attr in ['_cached_screen_width', '_cached_screen_height', '_cached_scale',
-                     '_cached_video_width', '_cached_video_height',
-                     '_cached_x_offset', '_cached_y_offset']:
-            if hasattr(self, attr):
-                delattr(self, attr)
+        # Clear all cached dimensions for next media
+        self._clear_video_layout_cache()
 
         # Return to background only if explicitly requested
         if return_to_background and self.background_image and os.path.exists(self.background_image):
@@ -689,6 +692,8 @@ class AdPlayerWindow(QMainWindow):
 
             if cmd['type'] == 'play':
                 # Switch to new content
+                # Ensure fresh layout calc for new media
+                self._clear_video_layout_cache()
                 if cmd['is_image']:
                     self.display_image(cmd['file'], cmd['duration'], is_background=False)
                 else:
@@ -696,6 +701,8 @@ class AdPlayerWindow(QMainWindow):
                 self.fade_in()
             elif cmd['type'] == 'background':
                 # Return to background
+                # Clear any video layout cache so next video recalculates
+                self._clear_video_layout_cache()
                 self.display_image(self.background_image, 0, is_background=True)
                 self.fade_in()
 
