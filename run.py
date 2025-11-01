@@ -119,9 +119,9 @@ class VideoThread(QThread):
         import time
 
         if not SYNC_SUPPORT:
-            # Fallback to video-only playback without audio
-            print("Playing video without audio (ffpyplayer not available)")
-            self._run_video_only()
+            # Audio must never be missing: do not play video-only
+            print("ERROR: Audio backend unavailable. Aborting playback to avoid silent video.")
+            self.playback_finished.emit(np.array([]))
             return
 
         try:
@@ -714,13 +714,25 @@ class AdPlayerWindow(QMainWindow):
                 self.video_thread.stop()
                 self.video_thread.wait()
 
-            # Use GStreamer for hardware acceleration if available
+            # Select backend ensuring audio is always present
+            backend_selected = False
+
+            # Prefer GStreamer when available (A/V sync + hardware acceleration)
             if GSTREAMER_AVAILABLE:
                 print(f"Playing with GStreamer (hardware-accelerated): {video_path}")
                 self.video_thread = GStreamerVideoPlayer(video_path, duration)
-            else:
+                backend_selected = True
+
+            # Otherwise use ffpyplayer if available (unified A/V decoder)
+            elif SYNC_SUPPORT:
                 print(f"Playing with ffpyplayer (software): {video_path}")
                 self.video_thread = VideoThread(video_path, duration)
+                backend_selected = True
+
+            # If no audio-capable backend, refuse to play to avoid silent video
+            if not backend_selected:
+                print("ERROR: No audio-capable backend available (GStreamer/ffpyplayer missing). Not playing video.")
+                return
 
             self.video_thread.frame_ready.connect(self.update_frame)
             self.video_thread.playback_finished.connect(self.on_video_finished)
