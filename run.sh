@@ -31,6 +31,20 @@ if [ -z "${DISPLAY:-}" ]; then
     export DISPLAY=:0
 fi
 
+# ===================================
+# Audio Configuration for Ubuntu
+# ===================================
+# SDL Audio Driver (prefer PulseAudio, fallback to ALSA)
+export SDL_AUDIODRIVER=pulseaudio
+
+# Set audio device to default system audio
+export AUDIODEV=/dev/snd/pcm
+
+# Allow audio device access
+if [ -e /dev/snd/pcm ]; then
+    chmod 666 /dev/snd/pcm 2>/dev/null || true
+fi
+
 # If running as root from cron, wire this process to the active desktop session
 if [ "$(id -u)" -eq 0 ]; then
     # Try to detect the active graphical user (seat0) and its UID
@@ -83,6 +97,12 @@ if [ "$(id -u)" -eq 0 ]; then
         if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "/run/user/$DESKTOP_UID/bus" ]; then
             export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$DESKTOP_UID/bus"
         fi
+
+        # Configure PulseAudio to use the desktop user's session
+        if [ -S "/run/user/$DESKTOP_UID/pulse/native" ]; then
+            export PULSE_SERVER="unix:/run/user/$DESKTOP_UID/pulse/native"
+            export PULSE_COOKIE="/home/$DESKTOP_USER/.config/pulse/cookie"
+        fi
     fi
 
     # Force Qt to use X11/XWayland when DISPLAY is present
@@ -93,8 +113,42 @@ if [ "$(id -u)" -eq 0 ]; then
     # Helpful diagnostics (only when interactive shell has a TTY)
     if [ -t 1 ]; then
         echo "Running as root; bound to desktop user: ${DESKTOP_USER:-unknown} (UID: ${DESKTOP_UID:-?})"
-        echo "DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset} DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unset}"
+        echo "DISPLAY=${DISPLAY:-unset} XAUTHORITY=${XAUTHORITY:-unset}"
+        echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unset}"
+        echo "PULSE_SERVER=${PULSE_SERVER:-unset} SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-unset}"
     fi
+fi
+
+# Additional audio diagnostics (for all users)
+if [ -t 1 ]; then
+    echo ""
+    echo "🔊 Audio System Check:"
+
+    # Check if ffplay is available
+    if command -v ffplay >/dev/null 2>&1; then
+        echo "  ✓ ffplay found: $(which ffplay)"
+    else
+        echo "  ✗ ffplay NOT found - install with: sudo apt install ffmpeg"
+    fi
+
+    # Check PulseAudio
+    if command -v pulseaudio >/dev/null 2>&1; then
+        echo "  ✓ PulseAudio found"
+        if pgrep -x pulseaudio >/dev/null 2>&1; then
+            echo "  ✓ PulseAudio is running"
+        else
+            echo "  ⚠ PulseAudio not running"
+        fi
+    fi
+
+    # Check audio devices
+    if [ -e /dev/snd/ ]; then
+        echo "  ✓ Audio devices found: /dev/snd/"
+    else
+        echo "  ✗ No audio devices found"
+    fi
+
+    echo ""
 fi
 
 # Function to show usage

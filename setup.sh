@@ -2,8 +2,8 @@
 # ===========================================
 # 🎬 Raspberry Pi Video Player Setup Script
 # ===========================================
-# Dependencies: PyQt5, OpenCV, Pillow, NumPy
-# No GStreamer needed - using OpenCV for video
+# Dependencies: PyQt5, OpenCV, Pillow, NumPy, ffmpeg
+# Audio/Video: OpenCV for video + ffplay for audio
 
 set -euo pipefail
 
@@ -26,6 +26,10 @@ sudo apt install -y python3-pyqt5 pyqt5-dev-tools
 echo "   → Installing OpenCV system dependencies..."
 sudo apt install -y libgl1-mesa-glx libglib2.0-0 \
                     libavcodec-extra libavformat-dev libswscale-dev
+
+echo "   → Installing FFmpeg (includes ffplay for audio) and audio system..."
+sudo apt install -y ffmpeg pulseaudio pulseaudio-utils alsa-utils \
+                    libsdl2-2.0-0
 
 echo "   → Installing X11 libraries for Qt GUI..."
 sudo apt install -y libxcb-xinerama0 libx11-xcb1 libxkbcommon-x11-0 libxcb-icccm4 \
@@ -56,8 +60,13 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✅ Setup complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "📦 Installed packages:"
+echo "📦 Installed Python packages:"
 pip list | grep -E "PyQt5|opencv-python|Pillow|numpy"
+
+echo ""
+echo "🔊 Audio system:"
+command -v ffplay >/dev/null 2>&1 && echo "  ✓ ffplay: $(ffplay -version | head -n1)" || echo "  ✗ ffplay not found"
+pgrep -x pulseaudio >/dev/null 2>&1 && echo "  ✓ PulseAudio is running" || echo "  ⚠ PulseAudio not running"
 echo ""
 echo "📝 Next steps:"
 echo "   1. Activate venv: source venv/bin/activate"
