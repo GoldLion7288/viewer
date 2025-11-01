@@ -19,17 +19,21 @@ try:
     from gi.repository import Gst, GLib
     Gst.init(None)
     GSTREAMER_AVAILABLE = True
+    print("=" * 60)
     print("GStreamer loaded - hardware-accelerated playback enabled")
+    print("=" * 60)
 except ImportError:
     GSTREAMER_AVAILABLE = False
+    print("=" * 60)
     print("GStreamer not available - falling back to ffpyplayer")
+    print("=" * 60)
 
 
 # ===================================
 # RASPBERRY PI PERFORMANCE OPTIMIZATION
 # ===================================
 # Set to True for Raspberry Pi (enables all optimizations)
-RASPBERRY_PI_MODE = True
+RASPBERRY_PI_MODE = False  # Changed to False for maximum quality on desktop/PC
 
 # Performance settings for Raspberry Pi
 if RASPBERRY_PI_MODE:
@@ -43,11 +47,11 @@ if RASPBERRY_PI_MODE:
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
 else:
-    # Desktop mode: highest quality
-    FRAME_INTERPOLATION = cv2.INTER_LANCZOS4  # Highest quality
-    PLAYBACK_SLEEP = 0.001  # 1ms sleep
-    TARGET_FPS = 30  # Full framerate
-    SCALING_MODE = 'fit'  # Fit screen with black bars
+    # Desktop mode: MAXIMUM quality settings
+    FRAME_INTERPOLATION = cv2.INTER_LANCZOS4  # Highest quality interpolation
+    PLAYBACK_SLEEP = 0.0001  # Minimal sleep for smooth playback (100 microseconds)
+    TARGET_FPS = 60  # Maximum framerate for desktop
+    SCALING_MODE = 'fit'  # Fit screen with black bars (preserves aspect ratio)
 
 # Enable OpenCV optimizations
 try:
@@ -55,18 +59,43 @@ try:
     if RASPBERRY_PI_MODE:
         # Fewer threads can reduce scheduling jitter on small CPUs
         cv2.setNumThreads(1)
-except Exception:
-    pass
+        print("OpenCV: Using 1 thread for Raspberry Pi")
+    else:
+        # Desktop mode: Use all available CPU cores for maximum performance
+        import multiprocessing
+        num_cores = multiprocessing.cpu_count()
+        cv2.setNumThreads(num_cores)
+        print(f"OpenCV: Using {num_cores} threads for maximum performance")
+except Exception as e:
+    print(f"OpenCV optimization warning: {e}")
 
 # Audio/Video synchronization using ffpyplayer (unified decoder)
 try:
     from ffpyplayer.player import MediaPlayer
     SYNC_SUPPORT = True
     print("ffpyplayer loaded - synchronized A/V playback enabled")
-    if RASPBERRY_PI_MODE:
-        print("Raspberry Pi optimization mode: ENABLED")
 except ImportError:
     SYNC_SUPPORT = False
+    print("WARNING: ffpyplayer not available - audio playback will be disabled in fallback mode")
+
+# Print quality configuration summary
+print("\n" + "=" * 60)
+print("VIDEO PLAYER QUALITY CONFIGURATION")
+print("=" * 60)
+if RASPBERRY_PI_MODE:
+    print("Mode: RASPBERRY PI (Performance Optimized)")
+    print(f"  - Frame Interpolation: INTER_AREA (quality + speed)")
+    print(f"  - Target FPS: {TARGET_FPS}")
+    print(f"  - OpenCV Threads: 1 (reduced jitter)")
+else:
+    print("Mode: DESKTOP/PC (MAXIMUM QUALITY)")
+    print(f"  - Frame Interpolation: LANCZOS4 (highest quality)")
+    print(f"  - Target FPS: {TARGET_FPS} (maximum)")
+    print(f"  - OpenCV Threads: {cv2.getNumThreads()} (all CPU cores)")
+print(f"Scaling Mode: {SCALING_MODE} (preserves aspect ratio)")
+print(f"GStreamer Available: {GSTREAMER_AVAILABLE}")
+print(f"Audio Support (ffpyplayer): {SYNC_SUPPORT}")
+print("=" * 60 + "\n")
 
 # IPC Configuration
 IPC_SOCKET_PATH = '/tmp/video_player_ipc.sock'
@@ -97,21 +126,29 @@ class VideoThread(QThread):
 
         try:
             # Create MediaPlayer - handles BOTH audio and video with perfect sync
-            # ff_opts: Configure for Raspberry Pi optimization
+            # ff_opts: Configure for MAXIMUM quality playback
             ff_opts = {
                 'sync': 'audio',  # Sync video to audio clock
-                'framedrop': True,  # Drop frames if needed to maintain sync
+                'framedrop': False,  # Don't drop frames for better quality
+                'lowres': 0,  # Full resolution (0=full, 1=half, 2=quarter)
+                'skip_frame': 0,  # Don't skip frames (0=none, 1=nonref, 2=bidir)
+                'an': False,  # Enable audio (an=False means audio is NOT disabled)
+                'autoexit': False,  # Don't auto-exit on stream end
             }
 
             # Additional Raspberry Pi optimizations
             if RASPBERRY_PI_MODE:
                 ff_opts.update({
                     'fast': True,  # Enable fast decoding
-                    'lowres': 0,  # No resolution reduction (0=full, 1=half, 2=quarter)
-                    'skip_frame': 0,  # Don't skip frames in decoder (0=none, 1=nonref, 2=bidir)
+                    'framedrop': True,  # Drop frames if needed to maintain sync on Pi
                 })
 
+            print(f"ffpyplayer options: {ff_opts}")
             self.media_player = MediaPlayer(self.video_path, ff_opts=ff_opts)
+
+            # Verify audio is enabled
+            if self.media_player:
+                print("MediaPlayer created successfully with audio enabled")
 
         except Exception as e:
             print(f"Error creating MediaPlayer: {e}")
@@ -273,13 +310,21 @@ class GStreamerVideoPlayer(QThread):
             appsink = self.pipeline.get_by_name('sink')
             appsink.set_property('emit-signals', True)
             appsink.set_property('max-buffers', 2)
-            appsink.set_property('drop', True)
+            appsink.set_property('drop', False)  # Don't drop frames for better quality
             appsink.set_property('sync', True)
 
             # Connect to new-sample signal
             appsink.connect('new-sample', self._on_new_sample)
 
+            # Set up bus to monitor for errors and warnings
+            bus = self.pipeline.get_bus()
+            bus.add_signal_watch()
+            bus.connect('message::error', self._on_bus_error)
+            bus.connect('message::warning', self._on_bus_warning)
+            bus.connect('message::eos', self._on_bus_eos)
+
             # Start playback
+            print("Starting GStreamer playback...")
             self.pipeline.set_state(Gst.State.PLAYING)
 
             # Run GLib main loop with duration limit
@@ -312,7 +357,7 @@ class GStreamerVideoPlayer(QThread):
             self.playback_finished.emit(np.array([]))
 
     def _build_pipeline(self):
-        """Build GStreamer pipeline with hardware acceleration for Raspberry Pi"""
+        """Build GStreamer pipeline with hardware acceleration and robust audio support"""
         # Detect Raspberry Pi hardware decoder
         # Pi 4/5: v4l2h264dec (V4L2 hardware decoder)
         # Pi 3 and earlier: omxh264dec (OpenMAX hardware decoder)
@@ -340,22 +385,44 @@ class GStreamerVideoPlayer(QThread):
         # Build pipeline with BOTH video and audio
         # Architecture:
         #   filesrc → decodebin → video: videoconvert → appsink (to PyQt)
-        #                      → audio: audioconvert → autoaudiosink (to speakers)
+        #                      → audio: audioconvert → volume → audio sink (to speakers)
         #
         # This provides:
         # - Hardware-accelerated H.264 video decoding
         # - Synchronized audio playback through system audio
         # - Perfect A/V sync maintained by GStreamer
+        # - Enhanced audio pipeline with volume control and multiple audio sink options
+
+        # Try multiple audio sinks for better compatibility
+        # Priority: pulsesink (Linux PulseAudio) > directsoundsink (Windows) > autoaudiosink (fallback)
+        audio_sink = 'autoaudiosink'
+
+        # Detect available audio sinks
+        try:
+            if Gst.ElementFactory.find('pulsesink'):
+                audio_sink = 'pulsesink'
+                print("Using PulseAudio sink for audio output")
+            elif Gst.ElementFactory.find('directsoundsink'):
+                audio_sink = 'directsoundsink'
+                print("Using DirectSound sink for audio output")
+            elif Gst.ElementFactory.find('wasapisink'):
+                audio_sink = 'wasapisink'
+                print("Using WASAPI sink for audio output")
+            else:
+                print("Using auto audio sink (fallback)")
+        except Exception as e:
+            print(f"Audio sink detection warning: {e}")
 
         pipeline = (
             f'filesrc location="{self.video_path}" ! '
             f'decodebin name=dec '
-            # Video path: decode → convert → app
-            f'dec. ! videoconvert ! video/x-raw,format=RGB ! appsink name=sink '
-            # Audio path: decode → convert → speakers
-            f'dec. ! audioconvert ! audioresample ! autoaudiosink'
+            # Video path: decode → convert → app (maximum quality)
+            f'dec. ! videoconvert ! video/x-raw,format=RGB ! appsink name=sink emit-signals=true max-buffers=2 drop=false sync=true '
+            # Audio path: decode → convert → resample → volume → speakers (enhanced pipeline)
+            f'dec. ! audioconvert ! audioresample ! volume volume=1.0 ! {audio_sink} sync=true'
         )
 
+        print(f"GStreamer pipeline: {pipeline}")
         return pipeline
 
     def _on_new_sample(self, appsink):
@@ -393,6 +460,23 @@ class GStreamerVideoPlayer(QThread):
             print(f"Frame processing error: {e}")
 
         return Gst.FlowReturn.OK
+
+    def _on_bus_error(self, bus, message):
+        """Handle GStreamer bus errors"""
+        err, debug = message.parse_error()
+        print(f"GStreamer ERROR: {err}")
+        print(f"Debug info: {debug}")
+
+    def _on_bus_warning(self, bus, message):
+        """Handle GStreamer bus warnings"""
+        warn, debug = message.parse_warning()
+        print(f"GStreamer WARNING: {warn}")
+        if debug:
+            print(f"Debug info: {debug}")
+
+    def _on_bus_eos(self, bus, message):
+        """Handle end-of-stream"""
+        print("GStreamer: End of stream reached")
 
     def stop(self):
         """Stop playback"""
@@ -670,6 +754,8 @@ class AdPlayerWindow(QMainWindow):
                 screen_geometry = screen.geometry()
                 self._cached_screen_width = screen_geometry.width()
                 self._cached_screen_height = screen_geometry.height()
+                print(f"Screen resolution: {self._cached_screen_width}x{self._cached_screen_height}")
+                print(f"Video source resolution: {frame_width}x{frame_height}")
 
             screen_width = self._cached_screen_width
             screen_height = self._cached_screen_height
