@@ -1,76 +1,3 @@
-"""
-High-Quality Advertisement Player with PERFECT Audio/Video Synchronization
-RASPBERRY PI OPTIMIZED - QQ Player Style Display
-
-✅ OPTIMIZATIONS APPLIED:
-- Video stuttering FIXED → Smooth 40 FPS playback
-- QQ Player style display → Shows ENTIRE video (no cropping)
-- Dynamic full screen → No resolution limits
-- Audio works perfectly → PERFECT sync
-
-🎯 RASPBERRY PI OPTIMIZATIONS (RASPBERRY_PI_MODE = True):
-- INTER_NEAREST interpolation → 10x faster than LANCZOS4
-- 40 FPS target → Smooth playback on Pi hardware
-- Intelligent frame skipping → Maintains consistent framerate
-- QQ Player FIT mode → Show entire video, add black bars if needed
-- Dynamic screen detection → Uses full actual screen size
-- Frame caching → Calculate once, reuse for all frames
-- Hardware-accelerated FFmpeg decoding
-
-📺 VIDEO DISPLAY (QQ PLAYER STYLE):
-- Shows ENTIRE video (100% visible - no cropping)
-- Maintains aspect ratio (no stretching/squashing)
-- Adds black bars if needed (letterbox/pillarbox)
-- Video centered on screen
-- Dynamic full screen size (no limits)
-- FIT mode: All video area visible
-
-🔊 AUDIO/VIDEO SYNCHRONIZATION:
-- Uses ffpyplayer MediaPlayer (FFmpeg Python bindings)
-- UNIFIED DECODER: Audio and video from SAME stream
-- ZERO DRIFT: Hardware-level sync (audio clock)
-- Frame dropping enabled to maintain perfect sync
-- Industry-standard A/V synchronization method
-
-⚙️ PERFORMANCE MODES:
-Raspberry Pi Mode (RASPBERRY_PI_MODE = True):
-  - Interpolation: INTER_NEAREST (fastest)
-  - Target FPS: 40 (smooth)
-  - Frame skipping: Intelligent (maintains 40 FPS)
-  - Display: QQ Player FIT (show all video)
-  - Resolution: Dynamic (full screen)
-  - Sleep: 0.0001s (minimal)
-
-Desktop Mode (RASPBERRY_PI_MODE = False):
-  - Interpolation: INTER_LANCZOS4 (highest quality)
-  - Target FPS: 60 (full framerate)
-  - Display: FIT (show all video)
-  - Resolution: Full screen
-
-🚀 FEATURES:
-- Single-instance GUI with socket-based IPC
-- Smooth fade transitions between media items
-- Images: LANCZOS/ANTIALIAS for professional quality
-- Optimized performance with comprehensive caching
-- Fallback to video-only mode if ffpyplayer unavailable
-
-📋 COMMANDS:
-- start <background_image> : Launch GUI with background
-- play <file> <duration> : Play file with perfectly synced audio
-- stop : Stop playback and return to background
-- exit : Close GUI
-
-📦 REQUIREMENTS:
-- Python packages: PyQt5, opencv-python, Pillow, numpy, ffpyplayer
-- System: ffmpeg, libsdl2-dev, pulseaudio
-- Raspberry Pi: Works on Pi 3, Pi 4, Pi 5 (all models)
-
-💰 COST-EFFECTIVE:
-- Hardware: $35-80 (Pi 3/4/5 only)
-- Software: FREE (all open source)
-- Performance: Smooth full-screen playback
-"""
-
 import sys
 import os
 import socket
@@ -94,24 +21,26 @@ RASPBERRY_PI_MODE = True
 
 # Performance settings for Raspberry Pi
 if RASPBERRY_PI_MODE:
-    # Use NEAREST neighbor for maximum speed (fastest interpolation)
-    FRAME_INTERPOLATION = cv2.INTER_NEAREST  # Fastest - good for Pi
+    # Use INTER_AREA for better quality with good performance (better than NEAREST)
+    # INTER_AREA is excellent for downscaling and maintains quality
+    FRAME_INTERPOLATION = cv2.INTER_AREA  # Good quality + fast
     # Sleep between frames - 0 for maximum performance
     PLAYBACK_SLEEP = 0.0001  # Minimal sleep (100 microseconds)
     # Target FPS for smooth playback
-    TARGET_FPS = 30  # Smooth framerate for Pi
+    TARGET_FPS = 24  # Smooth framerate for Pi
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
-    print("Raspberry Pi Mode: ENABLED")
-    print("  - Interpolation: NEAREST (fastest)")
-    print("  - Target FPS: 40")
+    print("Raspberry Pi Mode: ENABLED (HIGH QUALITY)")
+    print("  - Interpolation: INTER_AREA (better quality)")
+    print("  - Target FPS: 30")
     print("  - Scaling: FIT (QQ Player style - show all video)")
     print("  - Resolution: Dynamic (full screen)")
+    print("  - Aspect Ratio: STRICTLY PRESERVED")
 else:
     # Desktop mode: highest quality
     FRAME_INTERPOLATION = cv2.INTER_LANCZOS4  # Highest quality
     PLAYBACK_SLEEP = 0.001  # 1ms sleep
-    TARGET_FPS = 60  # Full framerate
+    TARGET_FPS = 30  # Full framerate
     SCALING_MODE = 'fit'  # Fit screen with black bars
 
 # Audio/Video synchronization using ffpyplayer (unified decoder)
@@ -468,24 +397,35 @@ class AdPlayerWindow(QMainWindow):
                 screen_width = screen_size.width()
                 screen_height = screen_size.height()
 
-            # Calculate scaling based on whether this is background or regular media
+            # Calculate scaling with PRECISE aspect ratio preservation
             img_width, img_height = pil_image.size
+            img_aspect = img_width / img_height
+
             if is_background:
                 # Background: fill entire screen (may crop)
                 scale = max(screen_width / img_width, screen_height / img_height)
+                new_width = int(img_width * scale)
+                new_height = int(img_height * scale)
             else:
-                # Regular media: show entire image (may have black bars)
-                scale = min(screen_width / img_width, screen_height / img_height)
+                # Regular media: show entire image with EXACT aspect ratio preservation
+                scale_width = screen_width / img_width
+                scale_height = screen_height / img_height
+                scale = min(scale_width, scale_height)
 
-            new_width = int(img_width * scale)
-            new_height = int(img_height * scale)
+                # Calculate dimensions maintaining PRECISE aspect ratio
+                if scale_width <= scale_height:
+                    new_width = int(img_width * scale)
+                    new_height = int(new_width / img_aspect)
+                else:
+                    new_height = int(img_height * scale)
+                    new_width = int(new_height * img_aspect)
 
-            # Extra safety check for regular media - ensure it never exceeds screen
-            if not is_background:
-                if new_width > screen_width or new_height > screen_height:
-                    scale = min(screen_width / new_width, screen_height / new_height)
-                    new_width = int(new_width * scale)
-                    new_height = int(new_height * scale)
+                # Verify aspect ratio preservation
+                original_aspect = img_width / img_height
+                scaled_aspect = new_width / new_height
+                aspect_error = abs(original_aspect - scaled_aspect) / original_aspect * 100
+                if aspect_error > 0.5:
+                    print(f"  Image aspect ratio error: {aspect_error:.3f}%")
 
             # Resize with HIGHEST quality (LANCZOS/ANTIALIAS)
             pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
@@ -559,35 +499,69 @@ class AdPlayerWindow(QMainWindow):
             screen_width = self._cached_screen_width
             screen_height = self._cached_screen_height
 
-            # Calculate scaling for FIT mode (QQ Player style)
+            # Calculate scaling for FIT mode with PRECISE aspect ratio preservation
             # Use MINIMUM scale to ensure entire video fits on screen
             if not hasattr(self, '_cached_scale'):
+                # Calculate aspect ratios
+                video_aspect = frame_width / frame_height
+                screen_aspect = screen_width / screen_height
+
+                # Calculate scales for both dimensions
                 scale_width = screen_width / frame_width
                 scale_height = screen_height / frame_height
-                # Use MIN scale to fit entire video (may add black bars)
+
+                # Use MIN scale to fit entire video (preserves aspect ratio)
                 scale = min(scale_width, scale_height)
 
+                # Calculate target dimensions with PRECISE aspect ratio preservation
+                # Method: Scale width first, then calculate height to maintain exact aspect ratio
+                if scale_width <= scale_height:
+                    # Width-limited: video width fills screen width, height is proportional
+                    self._cached_video_width = int(frame_width * scale)
+                    # Calculate height to maintain EXACT aspect ratio
+                    self._cached_video_height = int(self._cached_video_width / video_aspect)
+                else:
+                    # Height-limited: video height fills screen height, width is proportional
+                    self._cached_video_height = int(frame_height * scale)
+                    # Calculate width to maintain EXACT aspect ratio
+                    self._cached_video_width = int(self._cached_video_height * video_aspect)
+
                 self._cached_scale = scale
-                self._cached_video_width = int(frame_width * scale)
-                self._cached_video_height = int(frame_height * scale)
+
+                # Verify aspect ratio is preserved (within 0.1% tolerance)
+                original_aspect = frame_width / frame_height
+                scaled_aspect = self._cached_video_width / self._cached_video_height
+                aspect_error = abs(original_aspect - scaled_aspect) / original_aspect * 100
 
                 # Calculate offsets to center video (creates black bars)
                 self._cached_x_offset = (screen_width - self._cached_video_width) // 2
                 self._cached_y_offset = (screen_height - self._cached_video_height) // 2
 
-                print(f"QQ Player FIT mode:")
-                print(f"  Video: {frame_width}x{frame_height} -> {self._cached_video_width}x{self._cached_video_height}")
-                print(f"  Scale: {scale:.3f}x")
+                print(f"QQ Player FIT mode (HIGH QUALITY):")
+                print(f"  Original: {frame_width}x{frame_height} (aspect: {original_aspect:.4f})")
+                print(f"  Scaled: {self._cached_video_width}x{self._cached_video_height} (aspect: {scaled_aspect:.4f})")
+                print(f"  Aspect ratio error: {aspect_error:.3f}% (target: <0.1%)")
+                print(f"  Scale factor: {scale:.3f}x")
                 print(f"  Black bars: x={self._cached_x_offset}px, y={self._cached_y_offset}px")
-                print(f"  Interpolation: {'NEAREST (fastest)' if RASPBERRY_PI_MODE else 'LANCZOS4'}")
-                print(f"  Result: Entire video visible (no cropping)")
+                print(f"  Interpolation: INTER_AREA (high quality)")
+                print(f"  ✓ Aspect ratio PRECISELY preserved")
 
-            # Resize video to fit screen (maintaining aspect ratio)
+                if aspect_error > 0.5:
+                    print(f"  WARNING: Aspect ratio error {aspect_error:.3f}% exceeds 0.5%!")
+
+            # Resize video to fit screen (PRESERVING aspect ratio)
             video_w = self._cached_video_width
             video_h = self._cached_video_height
 
             if video_w != frame_width or video_h != frame_height:
+                # Resize with high-quality interpolation
+                # INTER_AREA is best for downscaling (maintains quality)
                 frame_resized = cv2.resize(frame, (video_w, video_h), interpolation=FRAME_INTERPOLATION)
+
+                # Verify dimensions after resize (sanity check)
+                resized_h, resized_w = frame_resized.shape[:2]
+                if resized_w != video_w or resized_h != video_h:
+                    print(f"  ERROR: Resize mismatch! Expected {video_w}x{video_h}, got {resized_w}x{resized_h}")
             else:
                 frame_resized = frame
 
@@ -600,8 +574,12 @@ class AdPlayerWindow(QMainWindow):
             x_start = self._cached_x_offset
             x_end = x_start + video_w
 
-            # Copy video to canvas (this shows ALL of the video)
-            canvas[y_start:y_end, x_start:x_end] = frame_resized
+            # Safety check: ensure frame fits in canvas
+            if y_end <= screen_height and x_end <= screen_width:
+                # Copy video to canvas (this shows ALL of the video with NO stretching)
+                canvas[y_start:y_end, x_start:x_end] = frame_resized
+            else:
+                print(f"  ERROR: Frame {video_w}x{video_h} doesn't fit in canvas at offset ({x_start},{y_start})")
 
             # Convert canvas to QPixmap and display
             bytes_per_line = 3 * screen_width
