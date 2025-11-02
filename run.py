@@ -18,6 +18,8 @@ import time
 
 # IPC Configuration
 IPC_SOCKET_PATH = '/tmp/video_player_ipc.sock'
+# Global readiness flag: becomes True after background image is displayed
+GLOBAL_READY = False
 IPC_PORT = 45678
 
 
@@ -185,10 +187,23 @@ class IPCServerThread(QThread):
                         try:
                             command = json.loads(data)
                             print(f"Received command: {command}")
-                            self.command_received.emit(command)
 
-                            # Send acknowledgment
-                            client_socket.send(b"OK")
+                            # Special STATUS command: report if background is displayed
+                            cmd_type = command.get('command')
+                            if cmd_type == 'STATUS':
+                                try:
+                                    from run import GLOBAL_READY  # same module
+                                except Exception:
+                                    # Fallback if import path differs
+                                    ready = False
+                                else:
+                                    ready = GLOBAL_READY
+                                client_socket.send(b"READY" if ready else b"NOT_READY")
+                            else:
+                                # Forward normal commands to main window
+                                self.command_received.emit(command)
+                                # Send acknowledgment
+                                client_socket.send(b"OK")
                         except json.JSONDecodeError as e:
                             print(f"Invalid JSON: {e}")
                             client_socket.send(b"ERROR")
@@ -269,6 +284,9 @@ class AdPlayerWindow(QMainWindow):
         """Display initial background after window is fully initialized"""
         if self.background_image and os.path.exists(self.background_image):
             self.display_image(self.background_image, 0, is_background=True)
+            # Mark global readiness once background is rendered
+            global GLOBAL_READY
+            GLOBAL_READY = True
 
     def handle_ipc_command(self, command):
         """Handle commands received via IPC"""
