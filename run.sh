@@ -152,9 +152,56 @@ case "$COMMAND" in
         $PYTHON_CMD "$MAIN_SCRIPT" --start "$BACKGROUND_IMAGE" --single-instance > /dev/null 2>&1 &
         GUI_PID=$!
 
-        # Wait and verify it started
-        sleep 2
+        # Actively wait for IPC readiness instead of a fixed sleep
+        SOCKET="/tmp/video_player_ipc.sock"
+        READY_WAIT_SECS=15
+        start_ts=$(date +%s)
 
+        while true; do
+            # Break if process died during startup
+            if ! ps -p $GUI_PID > /dev/null 2>&1; then
+                echo "ERROR: GUI process exited during startup"
+                exit 1
+            fi
+
+            # Socket present and accepting connections?
+            if [ -S "$SOCKET" ]; then
+                if $PYTHON_CMD - <<'PY'
+import socket, json, sys
+SOCK = "/tmp/video_player_ipc.sock"
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(0.5)
+try:
+    s.connect(SOCK)
+    s.send(json.dumps({"command": "PING"}).encode("utf-8"))
+    try:
+        _ = s.recv(2)
+    except Exception:
+        pass
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+finally:
+    try:
+        s.close()
+    except Exception:
+        pass
+PY
+                then
+                    echo "GUI ready (IPC up)"
+                    break
+                fi
+            fi
+
+            # Timeout handling
+            if [ $(( $(date +%s) - start_ts )) -ge $READY_WAIT_SECS ]; then
+                echo "WARNING: GUI started but IPC not ready after ${READY_WAIT_SECS}s"
+                break
+            fi
+            sleep 0.2
+        done
+
+        # Final confirmation
         if ps -p $GUI_PID > /dev/null 2>&1; then
             echo "GUI started successfully (PID: $GUI_PID)"
         else
