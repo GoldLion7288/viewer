@@ -54,8 +54,9 @@ if RASPBERRY_PI_MODE:
     # Scaling behavior: 'fit' = show entire video (QQ Player style - no crop)
     SCALING_MODE = 'fit'  # Show ALL video area, add black bars if needed
 else:
-    # Desktop mode: MAXIMUM quality settings
-    FRAME_INTERPOLATION = cv2.INTER_LANCZOS4  # Highest quality interpolation
+    # Desktop mode: SMOOTH PLAYBACK (not maximum quality - speed matters!)
+    # CRITICAL: INTER_LINEAR is 5x faster than LANCZOS4 for real-time playback!
+    FRAME_INTERPOLATION = cv2.INTER_LINEAR  # Fast interpolation (smooth playback)
     PLAYBACK_SLEEP = 0.0001  # Minimal sleep for smooth playback (100 microseconds)
     TARGET_FPS = 60  # Maximum framerate for desktop
     SCALING_MODE = 'fit'  # Fit screen with black bars (preserves aspect ratio)
@@ -87,23 +88,23 @@ except ImportError:
 
 # Print quality configuration summary
 print("\n" + "=" * 60)
-print("VIDEO PLAYER QUALITY CONFIGURATION")
+print("VIDEO PLAYER ANTI-FREEZE CONFIGURATION")
 print("=" * 60)
 if RASPBERRY_PI_MODE:
     print("Mode: RASPBERRY PI (Performance Optimized)")
-    print(f"  - Frame Interpolation: INTER_AREA (quality + speed)")
+    print(f"  - Interpolation: INTER_AREA (quality + speed)")
     print(f"  - Target FPS: {TARGET_FPS}")
     print(f"  - OpenCV Threads: 1 (reduced jitter)")
 else:
-    print("Mode: DESKTOP/PC (MAXIMUM QUALITY)")
-    print(f"  - Frame Interpolation: LANCZOS4 (highest quality)")
-    print(f"  - Target FPS: {TARGET_FPS} (maximum)")
-    print(f"  - OpenCV Threads: {cv2.getNumThreads()} (all CPU cores)")
-print(f"Scaling Mode: {SCALING_MODE} (preserves aspect ratio)")
-print(f"GStreamer Available: {GSTREAMER_AVAILABLE}")
+    print("Mode: DESKTOP/PC (SMOOTH PLAYBACK - NO FREEZING!)")
+    print(f"  - Interpolation: INTER_LINEAR (5x faster than LANCZOS4)")
+    print(f"  - Target FPS: {TARGET_FPS}")
+    print(f"  - OpenCV Threads: {cv2.getNumThreads()}")
+print(f"Scaling: {SCALING_MODE} (preserves aspect ratio)")
+print(f"GStreamer: {GSTREAMER_AVAILABLE}")
 if GSTREAMER_AVAILABLE:
-    print(f"  - GStreamer Audio: {'ENABLED' if GSTREAMER_ENABLE_AUDIO else 'DISABLED (video only)'}")
-print(f"Audio Support (ffpyplayer): {SYNC_SUPPORT}")
+    print(f"  - Audio: {'ENABLED' if GSTREAMER_ENABLE_AUDIO else 'DISABLED'}")
+print(f"ffpyplayer: {SYNC_SUPPORT}")
 print("=" * 60 + "\n")
 
 # IPC Configuration
@@ -168,10 +169,8 @@ class VideoThread(QThread):
         last_frame = None
         frame_count = 0
 
-        # Main playback loop - MediaPlayer handles synchronization
+        # Main playback loop - OPTIMIZED for smooth playback
         while self.running:
-            frame_start = time.monotonic()
-
             # Get next frame from MediaPlayer (includes audio sync)
             frame_data, val = self.media_player.get_frame()
 
@@ -179,7 +178,7 @@ class VideoThread(QThread):
                 break
 
             if frame_data is None:
-                # No frame ready yet, wait a bit
+                # No frame ready yet, minimal wait
                 time.sleep(0.001)
                 continue
 
@@ -195,29 +194,17 @@ class VideoThread(QThread):
             last_frame = frame_rgb
             frame_count += 1
 
-            # PTS-based pacing for smooth, timestamp-accurate playback
-            # If pts is available, wait until wall clock reaches start + pts
-            try:
-                if pts is not None:
-                    target_time = start_time_monotonic + float(pts)
-                    now = time.monotonic()
-                    delay = target_time - now
-                    if delay > 0:
-                        # Sleep in short chunks to keep UI responsive
-                        time.sleep(min(delay, 0.02))
-                else:
-                    # Fallback to tiny sleep to avoid busy loop
-                    time.sleep(PLAYBACK_SLEEP)
-            except Exception:
-                # Any timing issue: minimal sleep to avoid spin
-                time.sleep(PLAYBACK_SLEEP)
-
             # If duration limit is set, stop once PTS exceeds it
             if self.duration > 0 and pts is not None and pts >= self.duration:
                 break
 
-            # Emit frame after pacing
+            # Emit frame IMMEDIATELY - let Qt event loop handle timing
+            # Audio sync is maintained by MediaPlayer internally
             self.frame_ready.emit(frame_rgb)
+
+            # CRITICAL: No sleep! ffpyplayer handles A/V sync internally.
+            # Adding sleep causes stuttering and frame drops.
+            # The get_frame() call itself blocks when needed for sync.
 
         # Cleanup
         if self.media_player:
@@ -319,9 +306,10 @@ class GStreamerVideoPlayer(QThread):
             # Get appsink element
             appsink = self.pipeline.get_by_name('sink')
             appsink.set_property('emit-signals', True)
-            appsink.set_property('max-buffers', 2)
-            appsink.set_property('drop', False)  # Don't drop frames for better quality
-            appsink.set_property('sync', True)
+            # CRITICAL: Increase buffers to prevent pipeline stalls and freezing!
+            appsink.set_property('max-buffers', 30)  # Was 2 - way too small!
+            appsink.set_property('drop', True)  # Drop old frames if we fall behind (prevents freezing)
+            appsink.set_property('sync', False)  # Let Qt handle sync (prevents blocking)
 
             # Connect to new-sample signal
             appsink.connect('new-sample', self._on_new_sample)
@@ -426,27 +414,29 @@ class GStreamerVideoPlayer(QThread):
         # Build pipeline based on audio preference
         if self.enable_audio:
             # Full pipeline with BOTH video and audio
-            # Using decodebin with queue for better buffering
+            # CRITICAL: Large buffers prevent freezing and stuttering!
             pipeline = (
                 f'filesrc location="{self.video_path}" ! '
                 f'decodebin name=dec '
-                # Video path: decode → queue → convert → app (maximum quality)
-                f'dec. ! queue max-size-buffers=2 ! videoconvert ! video/x-raw,format=RGB ! '
-                f'appsink name=sink emit-signals=true max-buffers=2 drop=false sync=true '
-                # Audio path: decode → queue → convert → resample → volume → speakers
-                f'dec. ! queue max-size-buffers=100 ! audioconvert ! audioresample ! '
-                f'volume volume=1.0 ! {audio_sink}'
+                # Video path: LARGE queue prevents stalls (was 2, now 60!)
+                f'dec. ! queue max-size-buffers=60 max-size-time=0 max-size-bytes=0 leaky=downstream ! '
+                f'videoconvert ! video/x-raw,format=RGB ! '
+                f'appsink name=sink emit-signals=true max-buffers=30 drop=true sync=false '
+                # Audio path: MASSIVE buffer prevents audio dropout (was 100, now 600!)
+                f'dec. ! queue max-size-buffers=600 max-size-time=0 max-size-bytes=0 leaky=downstream ! '
+                f'audioconvert ! audioresample ! volume volume=1.0 ! {audio_sink}'
             )
-            print(f"GStreamer pipeline (with audio): {pipeline}")
+            print(f"GStreamer pipeline (ANTI-FREEZE): video_q=60, audio_q=600, appsink=30, leaky=downstream")
         else:
             # Video-only pipeline (no audio)
+            # CRITICAL: Large buffers prevent freezing!
             pipeline = (
                 f'filesrc location="{self.video_path}" ! '
-                f'decodebin ! queue max-size-buffers=2 ! videoconvert ! '
+                f'decodebin ! queue max-size-buffers=60 leaky=downstream ! videoconvert ! '
                 f'video/x-raw,format=RGB ! appsink name=sink emit-signals=true '
-                f'max-buffers=2 drop=false sync=false'
+                f'max-buffers=30 drop=true sync=false'
             )
-            print(f"GStreamer pipeline (video only, no audio): {pipeline}")
+            print(f"GStreamer pipeline (ANTI-FREEZE, video only): video_q=60, appsink=30")
 
         return pipeline
 
@@ -622,7 +612,8 @@ class AdPlayerWindow(QMainWindow):
         for attr in [
             '_cached_screen_width', '_cached_screen_height', '_cached_scale',
             '_cached_video_width', '_cached_video_height',
-            '_cached_x_offset', '_cached_y_offset'
+            '_cached_x_offset', '_cached_y_offset', '_canvas', '_bytes_per_line',
+            '_need_black_bars'
         ]:
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -776,107 +767,86 @@ class AdPlayerWindow(QMainWindow):
 
     def update_frame(self, frame):
         """
-        Update display with new video frame - QQ PLAYER STYLE
-        - FIT mode: Shows ENTIRE video (all area visible)
-        - Maintains aspect ratio (no stretching)
-        - Adds black bars if needed (letterbox/pillarbox)
-        - No cropping - you see 100% of the video
-        - Optimized for Raspberry Pi performance
+        OPTIMIZED frame update - NO FREEZING!
+        - Pre-allocated canvas (created ONCE, not every frame!)
+        - FIT mode: Shows ENTIRE video with black bars
+        - Fast rendering with minimal overhead
         """
         try:
             # Get frame dimensions
             frame_height, frame_width, channel = frame.shape
 
-            # Get FULL screen dimensions dynamically (cached)
+            # INITIALIZE ONCE (first frame only) - CRITICAL FOR PERFORMANCE!
             if not hasattr(self, '_cached_screen_width'):
                 from PyQt5.QtWidgets import QApplication
                 screen = QApplication.primaryScreen()
                 screen_geometry = screen.geometry()
                 self._cached_screen_width = screen_geometry.width()
                 self._cached_screen_height = screen_geometry.height()
-                print(f"Screen resolution: {self._cached_screen_width}x{self._cached_screen_height}")
-                print(f"Video source resolution: {frame_width}x{frame_height}")
 
-            screen_width = self._cached_screen_width
-            screen_height = self._cached_screen_height
+                print("=" * 60)
+                print("ANTI-FREEZE OPTIMIZATIONS ACTIVE")
+                print(f"Screen: {self._cached_screen_width}x{self._cached_screen_height}")
+                print(f"Video: {frame_width}x{frame_height}")
 
-            # Calculate scaling for FIT mode with PRECISE aspect ratio preservation
-            # Use MINIMUM scale to ensure entire video fits on screen
-            if not hasattr(self, '_cached_scale'):
+                screen_width = self._cached_screen_width
+                screen_height = self._cached_screen_height
+
                 # Calculate aspect ratios
                 video_aspect = frame_width / frame_height
-                screen_aspect = screen_width / screen_height
-
-                # Calculate scales for both dimensions
                 scale_width = screen_width / frame_width
                 scale_height = screen_height / frame_height
-
-                # Use MIN scale to fit entire video (preserves aspect ratio)
                 scale = min(scale_width, scale_height)
 
-                # Calculate target dimensions with PRECISE aspect ratio preservation
-                # Method: Scale width first, then calculate height to maintain exact aspect ratio
+                # Calculate target dimensions maintaining aspect ratio
                 if scale_width <= scale_height:
-                    # Width-limited: video width fills screen width, height is proportional
                     self._cached_video_width = int(frame_width * scale)
-                    # Calculate height to maintain EXACT aspect ratio
                     self._cached_video_height = int(self._cached_video_width / video_aspect)
                 else:
-                    # Height-limited: video height fills screen height, width is proportional
                     self._cached_video_height = int(frame_height * scale)
-                    # Calculate width to maintain EXACT aspect ratio
                     self._cached_video_width = int(self._cached_video_height * video_aspect)
 
-                self._cached_scale = scale
-
-                # Verify aspect ratio is preserved (within 0.1% tolerance)
-                original_aspect = frame_width / frame_height
-                scaled_aspect = self._cached_video_width / self._cached_video_height
-                aspect_error = abs(original_aspect - scaled_aspect) / original_aspect * 100
-
-                # Calculate offsets to center video (creates black bars)
+                # Calculate offsets for centering
                 self._cached_x_offset = (screen_width - self._cached_video_width) // 2
                 self._cached_y_offset = (screen_height - self._cached_video_height) // 2
 
-                # Only print warning if aspect ratio error is significant
-                if aspect_error > 0.5:
-                    print(f"WARNING: Aspect ratio error {aspect_error:.3f}% (target: <0.1%)")
+                # PRE-ALLOCATE CANVAS ONCE! (This is the KEY optimization!)
+                # Fill with black once - we'll only update the video region
+                self._canvas = np.zeros((screen_height, screen_width, 3), dtype=np.uint8)
+                self._bytes_per_line = 3 * screen_width
+                self._need_black_bars = True  # Flag to clear canvas once
 
-            # Resize video to fit screen (PRESERVING aspect ratio)
+                print(f"Scaled: {self._cached_video_width}x{self._cached_video_height}")
+                print("Canvas: PRE-ALLOCATED (no per-frame allocation!)")
+                print("Black bars: Cleared ONCE only")
+                print("=" * 60)
+
+            # Resize video to fit screen
             video_w = self._cached_video_width
             video_h = self._cached_video_height
 
             if video_w != frame_width or video_h != frame_height:
-                # Resize with high-quality interpolation
-                # INTER_AREA is best for downscaling (maintains quality)
                 frame_resized = cv2.resize(frame, (video_w, video_h), interpolation=FRAME_INTERPOLATION)
-
-                # Verify dimensions after resize (sanity check)
-                resized_h, resized_w = frame_resized.shape[:2]
-                if resized_w != video_w or resized_h != video_h:
-                    print(f"  ERROR: Resize mismatch! Expected {video_w}x{video_h}, got {resized_w}x{resized_h}")
             else:
                 frame_resized = frame
 
-            # Create black canvas (full screen size) for QQ Player style
-            canvas = np.zeros((screen_height, screen_width, 3), dtype=np.uint8)
+            # Only clear black bars on first frame (NOT every frame!)
+            if self._need_black_bars:
+                self._canvas.fill(0)
+                self._need_black_bars = False
 
-            # Place video in center of canvas (creates black bars automatically)
+            # Update ONLY the video region (not entire canvas!)
             y_start = self._cached_y_offset
             y_end = y_start + video_h
             x_start = self._cached_x_offset
             x_end = x_start + video_w
 
-            # Safety check: ensure frame fits in canvas
-            if y_end <= screen_height and x_end <= screen_width:
-                # Copy video to canvas (this shows ALL of the video with NO stretching)
-                canvas[y_start:y_end, x_start:x_end] = frame_resized
-            else:
-                print(f"  ERROR: Frame {video_w}x{video_h} doesn't fit in canvas at offset ({x_start},{y_start})")
+            # Copy video to canvas (fast array operation)
+            self._canvas[y_start:y_end, x_start:x_end] = frame_resized
 
-            # Convert canvas to QPixmap and display
-            bytes_per_line = 3 * screen_width
-            q_image = QImage(canvas.data, screen_width, screen_height, bytes_per_line, QImage.Format_RGB888)
+            # Convert to QPixmap (zero-copy from pre-allocated buffer)
+            q_image = QImage(self._canvas.data, self._cached_screen_width, self._cached_screen_height,
+                           self._bytes_per_line, QImage.Format_RGB888)
 
             pixmap = QPixmap.fromImage(q_image)
             self.label.setPixmap(pixmap)
