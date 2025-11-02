@@ -1,21 +1,4 @@
-"""
-High-Quality Advertisement Player with Smooth Transitions
-Professional-grade media player with IPC control
 
-FEATURES:
-- Single-instance GUI with socket-based IPC
-- Smooth fade transitions between media items
-- Video: LANCZOS4 interpolation for crystal-clear scaling
-- Images: LANCZOS/ANTIALIAS for professional image quality
-- Hardware acceleration enabled
-- Accurate timing with 1.0x speed for seamless transitions
-
-COMMANDS:
-- start <background_image> : Launch GUI with background
-- play <file> <duration> : Play file seamlessly
-- stop : Stop playback and return to background
-- exit : Close GUI
-"""
 
 import sys
 import os
@@ -29,6 +12,8 @@ from PyQt5.QtGui import QPixmap, QImage
 import cv2
 from PIL import Image
 import numpy as np
+from ffpyplayer.player import MediaPlayer
+import time
 
 
 # IPC Configuration
@@ -37,7 +22,7 @@ IPC_PORT = 45678
 
 
 class VideoThread(QThread):
-    """Thread for video playback"""
+    """Thread for video playback with synchronized audio using ffpyplayer"""
     frame_ready = pyqtSignal(np.ndarray)
     playback_finished = pyqtSignal(np.ndarray)  # Send last frame with signal
 
@@ -46,66 +31,86 @@ class VideoThread(QThread):
         self.video_path = video_path
         self.duration = duration
         self.running = True
+        self.player = None
 
     def run(self):
-        """Play video with high-definition quality"""
-        import time
+        """Play video with audio synchronization using ffpyplayer"""
+        try:
+            # Create MediaPlayer with audio output enabled
+            # ff_opts: FFmpeg options for better quality and performance
+            ff_opts = {
+                'sync': 'audio',  # Synchronize to audio clock
+                'framedrop': True,  # Drop frames if behind to maintain sync
+            }
 
-        cap = cv2.VideoCapture(self.video_path)
+            self.player = MediaPlayer(self.video_path, ff_opts=ff_opts)
 
-        if not cap.isOpened():
-            print(f"Error: Cannot open video {self.video_path}")
-            self.playback_finished.emit(np.array([]))
-            return
+            start_time = time.time()
+            last_frame = None
+            frame_count = 0
 
-        # Enable hardware acceleration for better performance
-        cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+            # Playback loop
+            while self.running:
+                # Get frame and audio timing from player
+                frame_data, val = self.player.get_frame(show=False)
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0 or fps > 120:  # Sanity check
-            fps = 30  # Default fallback
+                if val == 'eof':
+                    # End of file reached
+                    break
+                elif frame_data is None:
+                    # No frame available yet, wait a bit
+                    time.sleep(0.001)
+                    continue
 
-        # Normal speed playback for accurate timing
-        speed_multiplier = 1.0
-        frame_delay = (1.0 / fps) / speed_multiplier
+                # Check duration limit
+                if self.duration > 0:
+                    elapsed = time.time() - start_time
+                    if elapsed >= self.duration:
+                        break
 
-        frames_played = 0
-        max_frames = int(self.duration * fps) if self.duration > 0 else float('inf')
-        last_frame = None
+                # Extract frame data
+                img, pts = frame_data
 
-        while self.running and cap.isOpened():
-            frame_start = time.time()
+                if img is not None:
+                    # Convert from ffpyplayer format to numpy array
+                    # ffpyplayer returns frames in RGB format
+                    width, height = img.get_size()
+                    frame_rgb = np.frombuffer(img.to_bytearray()[0], dtype=np.uint8)
+                    frame_rgb = frame_rgb.reshape((height, width, 3))
 
-            ret, frame = cap.read()
+                    last_frame = frame_rgb
+                    self.frame_ready.emit(frame_rgb)
+                    frame_count += 1
 
-            if not ret or frames_played >= max_frames:
-                break
+                    # Small sleep to prevent CPU spinning
+                    # ffpyplayer handles most of the timing
+                    time.sleep(0.001)
 
-            # Convert BGR to RGB for Qt with high quality
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            last_frame = frame_rgb  # Keep track of last frame
-            self.frame_ready.emit(frame_rgb)
+            print(f"Video playback finished: {frame_count} frames displayed")
 
-            frames_played += 1
+        except Exception as e:
+            print(f"Error during video playback: {e}")
+            import traceback
+            traceback.print_exc()
 
-            # Optimized frame timing - use precise sleep
-            elapsed = time.time() - frame_start
-            sleep_time = frame_delay - elapsed
+        finally:
+            # Clean up player
+            if self.player:
+                self.player.close_player()
+                self.player = None
 
-            if sleep_time > 0.001:  # Only sleep if meaningful time remains
-                self.msleep(int(sleep_time * 1000))
-
-        cap.release()
-
-        # Send last frame with finished signal so it can be held cleanly
-        if last_frame is not None:
-            self.playback_finished.emit(last_frame)
-        else:
-            self.playback_finished.emit(np.array([]))
+            # Send last frame with finished signal
+            if last_frame is not None:
+                self.playback_finished.emit(last_frame)
+            else:
+                self.playback_finished.emit(np.array([]))
 
     def stop(self):
         """Stop video playback"""
         self.running = False
+        if self.player:
+            self.player.close_player()
+            self.player = None
 
 
 class IPCServerThread(QThread):

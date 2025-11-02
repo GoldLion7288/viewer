@@ -1,9 +1,3 @@
-#!/bin/bash
-# ===========================================
-# 🎬 Raspberry Pi Video Player Setup Script
-# ===========================================
-# Dependencies: PyQt5, OpenCV, Pillow, NumPy
-# No GStreamer needed - using OpenCV for video
 
 set -euo pipefail
 
@@ -27,6 +21,11 @@ echo "   → Installing OpenCV system dependencies..."
 sudo apt install -y libgl1-mesa-glx libglib2.0-0 \
                     libavcodec-extra libavformat-dev libswscale-dev
 
+echo "   → Installing FFmpeg libraries for audio-video sync..."
+sudo apt install -y ffmpeg libavutil-dev libavcodec-dev libavformat-dev \
+                    libswresample-dev libavfilter-dev libavdevice-dev \
+                    libsdl2-dev libsdl2-mixer-2.0-0
+
 echo "   → Installing X11 libraries for Qt GUI..."
 sudo apt install -y libxcb-xinerama0 libx11-xcb1 libxkbcommon-x11-0 libxcb-icccm4 \
                     libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
@@ -43,25 +42,6 @@ source venv/bin/activate
 echo "   → Upgrading pip..."
 pip install --upgrade pip
 
-echo "   → Installing requirements (PyQt5, OpenCV, Pillow, NumPy)..."
+echo "   → Installing requirements (PyQt5, OpenCV, Pillow, NumPy, ffpyplayer)..."
 pip install -r requirements.txt
 
-echo ""
-echo "🔑 Step 6: Making scripts executable..."
-chmod +x run.sh
-chmod +x testrun.sh 2>/dev/null || true
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ Setup complete!"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "📦 Installed packages:"
-pip list | grep -E "PyQt5|opencv-python|Pillow|numpy"
-echo ""
-echo "📝 Next steps:"
-echo "   1. Activate venv: source venv/bin/activate"
-echo "   2. Run player: ./run.sh start test/background.jpg"
-echo ""
-echo "💡 Note: run.sh automatically uses the venv"
-echo ""
