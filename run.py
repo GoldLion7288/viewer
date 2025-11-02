@@ -287,7 +287,7 @@ class AdPlayerWindow(QMainWindow):
             self.close()
 
     def display_image(self, image_path, duration, is_background=False):
-        """Display image with MAXIMUM high quality"""
+        """Display image with smart full-screen sizing"""
         try:
             # Load image with Pillow for better quality
             pil_image = Image.open(image_path)
@@ -296,7 +296,7 @@ class AdPlayerWindow(QMainWindow):
             if pil_image.mode != 'RGB':
                 pil_image = pil_image.convert('RGB')
 
-            # Get screen size - use actual screen geometry, not label size
+            # Get screen size - use actual screen geometry
             from PyQt5.QtWidgets import QApplication
             screen = QApplication.primaryScreen()
             screen_geometry = screen.geometry()
@@ -309,26 +309,22 @@ class AdPlayerWindow(QMainWindow):
                 screen_width = screen_size.width()
                 screen_height = screen_size.height()
 
-            # Calculate scaling based on whether this is background or regular media
+            # Calculate optimal scaling to fit full screen
             img_width, img_height = pil_image.size
+
             if is_background:
-                # Background: fill entire screen (may crop)
+                # Background: fill entire screen (may crop to maintain aspect ratio)
                 scale = max(screen_width / img_width, screen_height / img_height)
             else:
-                # Regular media: show entire image (may have black bars)
+                # Regular media: fit entire image (may have black bars)
                 scale = min(screen_width / img_width, screen_height / img_height)
 
             new_width = int(img_width * scale)
             new_height = int(img_height * scale)
 
-            # Extra safety check for regular media - ensure it never exceeds screen
-            if not is_background:
-                if new_width > screen_width or new_height > screen_height:
-                    scale = min(screen_width / new_width, screen_height / new_height)
-                    new_width = int(new_width * scale)
-                    new_height = int(new_height * scale)
+            print(f"Image size adjusted: {img_width}x{img_height} → {new_width}x{new_height} (screen: {screen_width}x{screen_height}, bg={is_background})")
 
-            # Resize with HIGHEST quality (LANCZOS/ANTIALIAS)
+            # Resize with high quality (LANCZOS)
             pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
 
             # Center crop if background and image is larger than screen
@@ -338,6 +334,7 @@ class AdPlayerWindow(QMainWindow):
                 right = left + screen_width
                 bottom = top + screen_height
                 pil_image = pil_image.crop((left, top, right, bottom))
+                print(f"Background cropped to: {screen_width}x{screen_height}")
 
             # Convert to QPixmap with high quality
             img_array = np.array(pil_image)
@@ -346,7 +343,7 @@ class AdPlayerWindow(QMainWindow):
 
             q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
-            # Create pixmap with smooth transformation enabled
+            # Create pixmap
             pixmap = QPixmap.fromImage(q_image)
 
             self.label.setPixmap(pixmap)
@@ -359,12 +356,18 @@ class AdPlayerWindow(QMainWindow):
             print(f"Error displaying image {image_path}: {e}")
 
     def display_video(self, video_path, duration):
-        """Display video with high quality"""
+        """Display video with smart full-screen sizing"""
         try:
             # Stop any running video thread
             if self.video_thread and self.video_thread.isRunning():
                 self.video_thread.stop()
                 self.video_thread.wait()
+
+            # Clear cached video size to recalculate for new video
+            if hasattr(self, '_cached_video_size'):
+                delattr(self, '_cached_video_size')
+            if hasattr(self, '_cached_display_size'):
+                delattr(self, '_cached_display_size')
 
             # Create and start video thread
             self.video_thread = VideoThread(video_path, duration)
@@ -381,8 +384,9 @@ class AdPlayerWindow(QMainWindow):
             # Get frame dimensions
             height, width, channel = frame.shape
 
-            # Cache screen size for performance (updated only on first frame)
-            if not hasattr(self, '_cached_screen_size'):
+            # Check if video resolution changed or cache doesn't exist
+            cache_key = f"{width}x{height}"
+            if not hasattr(self, '_cached_video_size') or self._cached_video_size != cache_key:
                 from PyQt5.QtWidgets import QApplication
                 screen = QApplication.primaryScreen()
                 screen_geometry = screen.geometry()
@@ -395,15 +399,18 @@ class AdPlayerWindow(QMainWindow):
                     screen_width = screen_size.width()
                     screen_height = screen_size.height()
 
-                # Calculate optimal scaling (cache for performance)
+                # Calculate optimal scaling to fit full screen while maintaining aspect ratio
                 scale = min(screen_width / width, screen_height / height)
                 new_width = int(width * scale)
                 new_height = int(height * scale)
 
-                # Cache dimensions
-                self._cached_screen_size = (new_width, new_height)
+                # Cache dimensions for this video resolution
+                self._cached_video_size = cache_key
+                self._cached_display_size = (new_width, new_height)
+
+                print(f"Video size adjusted: {width}x{height} → {new_width}x{new_height} (screen: {screen_width}x{screen_height})")
             else:
-                new_width, new_height = self._cached_screen_size
+                new_width, new_height = self._cached_display_size
 
             # Fast bilinear interpolation for smoother real-time playback
             # INTER_LINEAR is faster than LANCZOS4 and still provides good quality
