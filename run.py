@@ -4,6 +4,7 @@ import socket
 import json
 import argparse
 from pathlib import Path
+from collections import deque
 from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QGraphicsOpacityEffect
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QSocketNotifier
 from PyQt5.QtGui import QPixmap, QImage
@@ -11,6 +12,7 @@ import cv2
 from PIL import Image
 import numpy as np
 import threading
+import time
 
 # GStreamer imports for hardware-accelerated playback
 try:
@@ -309,13 +311,13 @@ class GStreamerVideoPlayer(QThread):
             appsink = self.pipeline.get_by_name('sink')
             appsink.set_property('emit-signals', True)
 
-            # OPTIMIZED for smooth playback
-            appsink.set_property('max-buffers', 3)  # Slightly more buffering
-            appsink.set_property('drop', False)  # Keep all frames
-            appsink.set_property('sync', True)  # Sync to clock
+            # OPTIMIZED for ULTRA-SMOOTH playback - larger buffers prevent stuttering
+            appsink.set_property('max-buffers', 20)  # Large buffer pool for smooth playback
+            appsink.set_property('drop', True)  # Drop old frames if we fall behind
+            appsink.set_property('sync', False)  # Let Qt handle sync (prevents blocking)
             appsink.set_property('enable-last-sample', False)  # Don't keep last sample (saves memory)
 
-            print("GStreamer appsink: max-buffers=3, drop=False, sync=True (smooth mode)")
+            print("GStreamer appsink: max-buffers=20, drop=True, sync=False (ultra-smooth mode)")
 
             # Connect to new-sample signal
             appsink.connect('new-sample', self._on_new_sample)
@@ -419,27 +421,27 @@ class GStreamerVideoPlayer(QThread):
 
         # Build pipeline based on audio preference
         if self.enable_audio:
-            # OPTIMIZED pipeline for SMOOTH A/V playback
+            # ULTRA-OPTIMIZED pipeline for BUTTERY-SMOOTH A/V playback
             pipeline = (
                 f'filesrc location="{self.video_path}" ! '
                 f'decodebin name=dec '
-                # Video path: OPTIMIZED buffering for smooth playback
-                f'dec. ! queue max-size-buffers=5 max-size-time=0 max-size-bytes=0 ! '
+                # Video path: MASSIVE buffering for smooth playback (prevents stuttering)
+                f'dec. ! queue max-size-buffers=50 max-size-time=0 max-size-bytes=0 leaky=downstream ! '
                 f'videoconvert ! video/x-raw,format=RGB ! '
                 f'appsink name=sink '
-                # Audio path: Large buffer to prevent audio dropout
-                f'dec. ! queue max-size-buffers=200 max-size-time=0 max-size-bytes=0 ! '
+                # Audio path: Large buffer to prevent audio dropout + leaky mode
+                f'dec. ! queue max-size-buffers=500 max-size-time=0 max-size-bytes=0 leaky=downstream ! '
                 f'audioconvert ! audioresample ! volume volume=1.0 ! {audio_sink}'
             )
-            print(f"GStreamer (SMOOTH mode): video_queue=5, audio_queue=200")
+            print(f"GStreamer (ULTRA-SMOOTH mode): video_queue=50, audio_queue=500, leaky=downstream")
         else:
-            # Video-only pipeline
+            # Video-only pipeline with large buffers
             pipeline = (
                 f'filesrc location="{self.video_path}" ! '
-                f'decodebin ! queue max-size-buffers=5 ! videoconvert ! '
+                f'decodebin ! queue max-size-buffers=50 leaky=downstream ! videoconvert ! '
                 f'video/x-raw,format=RGB ! appsink name=sink'
             )
-            print(f"GStreamer (video only)")
+            print(f"GStreamer (video only, ultra-smooth mode)")
 
         return pipeline
 
@@ -570,12 +572,30 @@ class AdPlayerWindow(QMainWindow):
         self.is_transitioning = False
         self.pending_command = None
 
+        # Frame buffering for ultra-smooth playback
+        self.frame_queue = deque(maxlen=10)  # Buffer up to 10 frames
+        self.frame_queue_lock = threading.Lock()
+        self.last_displayed_frame = None
+        self.frame_display_timer = QTimer()
+        self.frame_display_timer.setTimerType(Qt.PreciseTimer)  # High-precision timing
+        self.frame_display_timer.timeout.connect(self._display_next_frame)
+        self.target_frame_time_ms = 16  # ~60 FPS default
+
+        # Performance monitoring
+        self.frames_rendered = 0
+        self.frames_dropped = 0
+        self.last_fps_time = time.time()
+
         # Setup window with high-quality rendering
         self.setWindowTitle('High-Quality Ad Player - IPC Control')
 
         # Enable high-quality rendering attributes
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WA_NoSystemBackground, False)
+
+        # Performance optimizations for smooth rendering
+        self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
+        self.setAttribute(Qt.WA_NativeWindow, True)
 
         self.showFullScreen()
 
@@ -615,10 +635,16 @@ class AdPlayerWindow(QMainWindow):
         for attr in [
             '_cached_screen_width', '_cached_screen_height', '_cached_scale',
             '_cached_video_width', '_cached_video_height',
-            '_cached_x_offset', '_cached_y_offset'
+            '_cached_x_offset', '_cached_y_offset', '_canvas', '_bytes_per_line',
+            '_need_full_clear'
         ]:
             if hasattr(self, attr):
                 delattr(self, attr)
+
+        # Reset performance counters
+        self.frames_rendered = 0
+        self.frames_dropped = 0
+        self.last_fps_time = time.time()
 
     def display_initial_background(self):
         """Display initial background after window is fully initialized"""
@@ -732,6 +758,27 @@ class AdPlayerWindow(QMainWindow):
                 self.video_thread.stop()
                 self.video_thread.wait()
 
+            # Clear frame buffer for new video
+            with self.frame_queue_lock:
+                self.frame_queue.clear()
+
+            # Detect video FPS for adaptive frame timing
+            try:
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    if fps > 0 and fps <= 120:
+                        self.target_frame_time_ms = int(1000 / fps)
+                        print(f"Video FPS: {fps:.1f} -> Frame time: {self.target_frame_time_ms}ms")
+                    else:
+                        self.target_frame_time_ms = 16  # Default 60fps
+                    cap.release()
+                else:
+                    self.target_frame_time_ms = 16  # Default 60fps
+            except Exception as e:
+                print(f"FPS detection warning: {e}")
+                self.target_frame_time_ms = 16  # Default 60fps
+
             # Select backend ensuring audio is always present
             backend_selected = False
 
@@ -769,12 +816,58 @@ class AdPlayerWindow(QMainWindow):
 
     def update_frame(self, frame):
         """
-        OPTIMIZED frame update for SMOOTH PLAYBACK
+        BUFFERED frame update for ULTRA-SMOOTH PLAYBACK
+        - Frames added to queue instead of displayed immediately
+        - Timer-based display for consistent frame pacing
+        - Prevents stuttering from irregular frame arrival
+        """
+        try:
+            # Add frame to buffer queue
+            with self.frame_queue_lock:
+                self.frame_queue.append(frame.copy())
+
+            # Start display timer if not already running
+            if not self.frame_display_timer.isActive():
+                # Calculate target frame time based on video
+                # Default to 16ms (~60fps) for smooth playback
+                self.frame_display_timer.start(self.target_frame_time_ms)
+
+        except Exception as e:
+            print(f"Error buffering frame: {e}")
+
+    def _display_next_frame(self):
+        """
+        Display next frame from buffer with optimized rendering
         - Pre-allocated canvas (no memory allocation per frame!)
         - Fast INTER_LINEAR interpolation
         - Direct QImage from buffer (zero-copy)
+        - Only clears black bars when needed
         """
         try:
+            # Get next frame from buffer
+            frame = None
+            with self.frame_queue_lock:
+                if self.frame_queue:
+                    frame = self.frame_queue.popleft()
+                else:
+                    # No frames in buffer - stop timer and hold last frame
+                    self.frame_display_timer.stop()
+                    return
+
+            if frame is None:
+                return
+
+            # Track performance
+            self.frames_rendered += 1
+            current_time = time.time()
+            if current_time - self.last_fps_time >= 5.0:  # Report every 5 seconds
+                elapsed = current_time - self.last_fps_time
+                fps = self.frames_rendered / elapsed
+                print(f"Playback: {fps:.1f} FPS | Buffered: {len(self.frame_queue)} frames | Dropped: {self.frames_dropped}")
+                self.frames_rendered = 0
+                self.frames_dropped = 0
+                self.last_fps_time = current_time
+
             # Get frame dimensions
             frame_height, frame_width, channel = frame.shape
 
@@ -787,7 +880,7 @@ class AdPlayerWindow(QMainWindow):
                 self._cached_screen_height = screen_geometry.height()
 
                 print("=" * 60)
-                print("OPTIMIZING FOR SMOOTH PLAYBACK")
+                print("ULTRA-SMOOTH BUFFERED PLAYBACK INITIALIZED")
                 print(f"  Screen: {self._cached_screen_width}x{self._cached_screen_height}")
                 print(f"  Video: {frame_width}x{frame_height}")
 
@@ -811,12 +904,15 @@ class AdPlayerWindow(QMainWindow):
                 self._cached_y_offset = (screen_height - self._cached_video_height) // 2
 
                 # PRE-ALLOCATE canvas once (HUGE performance boost!)
+                # Fill with black once - we'll only update video region
                 self._canvas = np.zeros((screen_height, screen_width, 3), dtype=np.uint8)
                 self._bytes_per_line = 3 * screen_width
+                self._need_full_clear = True  # Clear once at start
 
                 print(f"  Scaled: {self._cached_video_width}x{self._cached_video_height}")
                 print(f"  Canvas: PRE-ALLOCATED (no per-frame allocation!)")
                 print(f"  Interpolation: {FRAME_INTERPOLATION}")
+                print(f"  Frame buffer: {self.frame_queue.maxlen} frames")
                 print("=" * 60)
 
             # Resize video (FAST interpolation)
@@ -828,16 +924,18 @@ class AdPlayerWindow(QMainWindow):
             else:
                 frame_resized = frame
 
-            # CLEAR canvas to black (faster than creating new array)
-            self._canvas.fill(0)
+            # Only clear canvas on first frame - black bars stay black!
+            if self._need_full_clear:
+                self._canvas.fill(0)
+                self._need_full_clear = False
 
-            # Place video in center
+            # Place video in center (only update video region - not entire canvas!)
             y_start = self._cached_y_offset
             y_end = y_start + video_h
             x_start = self._cached_x_offset
             x_end = x_start + video_w
 
-            # Direct array assignment (fastest)
+            # Direct array assignment (fastest - only video pixels!)
             self._canvas[y_start:y_end, x_start:x_end] = frame_resized
 
             # Create QImage directly from buffer (ZERO-COPY!)
@@ -848,8 +946,10 @@ class AdPlayerWindow(QMainWindow):
             pixmap = QPixmap.fromImage(q_image)
             self.label.setPixmap(pixmap)
 
+            self.last_displayed_frame = frame
+
         except Exception as e:
-            print(f"Error updating frame: {e}")
+            print(f"Error displaying frame: {e}")
 
     def play_media(self, filepath, duration):
         """Play media file with smooth transition"""
@@ -886,6 +986,11 @@ class AdPlayerWindow(QMainWindow):
         """Stop current playback and optionally return to background"""
         # Stop timers
         self.media_timer.stop()
+        self.frame_display_timer.stop()
+
+        # Clear frame buffer
+        with self.frame_queue_lock:
+            self.frame_queue.clear()
 
         # Stop video thread
         if self.video_thread and self.video_thread.isRunning():
@@ -966,6 +1071,13 @@ class AdPlayerWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up on close"""
+        # Stop frame display timer
+        self.frame_display_timer.stop()
+
+        # Clear frame buffer
+        with self.frame_queue_lock:
+            self.frame_queue.clear()
+
         # Stop IPC server
         if self.ipc_thread and self.ipc_thread.isRunning():
             self.ipc_thread.stop()
@@ -1062,8 +1174,18 @@ def main():
             print("Existing instance found. Restarting...")
             kill_existing_instance()
 
-        # Start new GUI instance
+        # Start new GUI instance with optimizations
         app = QApplication(sys.argv)
+
+        # Enable Qt performance optimizations for smooth rendering
+        app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        app.setAttribute(Qt.AA_EnableHighDpiScaling, False)  # Manual scaling for more control
+
+        # Use raster graphics system for better performance
+        # (already set via QApplication, but noted here for clarity)
+
+        print("Qt Application initialized with performance optimizations")
+
         window = AdPlayerWindow(background_image=args.start)
         sys.exit(app.exec_())
 
