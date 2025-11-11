@@ -6,23 +6,59 @@ import socket
 import json
 import argparse
 from pathlib import Path
+from collections import deque
 from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QGraphicsOpacityEffect
-from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QSocketNotifier
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QPixmap, QImage
 import cv2
 from PIL import Image
 import numpy as np
 from ffpyplayer.player import MediaPlayer
 import time
+import platform
 
 
 # IPC Configuration
 IPC_SOCKET_PATH = '/tmp/video_player_ipc.sock'
 IPC_PORT = 45678
 
+# Performance Configuration
+FRAME_BUFFER_SIZE = 3  # Pre-buffer 3 frames for smooth playback
+FRAME_POOL_SIZE = 5    # Reuse frame buffers to reduce allocations
+ENABLE_HARDWARE_ACCEL = True  # Enable hardware H.264 decoding
 
-class VideoThread(QThread):
-    """Thread for smooth video playback with audio sync like QQ Player"""
+
+class FramePool:
+    """Memory pool for reusing frame buffers - reduces allocation overhead"""
+    def __init__(self, max_size=FRAME_POOL_SIZE):
+        self.pool = deque(maxlen=max_size)
+        self.max_size = max_size
+
+    def get(self, shape):
+        """Get a frame buffer from pool or create new one"""
+        # Try to reuse existing buffer with matching shape
+        for i, frame in enumerate(self.pool):
+            if frame.shape == shape:
+                return self.pool[i]
+
+        # Create new buffer if pool is not full
+        if len(self.pool) < self.max_size:
+            return np.empty(shape, dtype=np.uint8)
+
+        # Reuse oldest buffer and resize if needed
+        frame = self.pool.popleft()
+        if frame.shape != shape:
+            frame = np.empty(shape, dtype=np.uint8)
+        return frame
+
+    def release(self, frame):
+        """Return frame buffer to pool"""
+        if len(self.pool) < self.max_size:
+            self.pool.append(frame)
+
+
+class OptimizedVideoThread(QThread):
+    """Optimized thread for H.264 hardware-accelerated video playback"""
     frame_ready = pyqtSignal(np.ndarray)
     playback_finished = pyqtSignal(np.ndarray)
 
@@ -32,29 +68,103 @@ class VideoThread(QThread):
         self.duration = duration
         self.running = True
         self.player = None
+        self.frame_pool = FramePool()
+        self.frame_buffer = deque(maxlen=FRAME_BUFFER_SIZE)
+
+    def get_hardware_codec_options(self):
+        """Get hardware acceleration options based on platform"""
+        ff_opts = {
+            'paused': False,
+            'autoexit': False,
+            'sync': 'audio',  # Sync to audio for better A/V sync
+        }
+
+        if not ENABLE_HARDWARE_ACCEL:
+            return ff_opts
+
+        system = platform.system()
+        machine = platform.machine()
+
+        # Raspberry Pi hardware acceleration (H.264 MMAL or V4L2 M2M)
+        if 'arm' in machine.lower() or 'aarch64' in machine.lower():
+            ff_opts['codec'] = 'h264_mmal'  # Try MMAL first
+            ff_opts['lowres'] = '0'
+            ff_opts['fast'] = '1'
+            print("Using Raspberry Pi H.264 hardware acceleration (MMAL)")
+
+        # NVIDIA GPU acceleration
+        elif os.path.exists('/proc/driver/nvidia/version'):
+            ff_opts['codec'] = 'h264_cuvid'
+            ff_opts['hwaccel'] = 'cuda'
+            print("Using NVIDIA H.264 hardware acceleration (CUVID)")
+
+        # Intel hardware acceleration (VAAPI on Linux)
+        elif system == 'Linux' and os.path.exists('/dev/dri'):
+            ff_opts['hwaccel'] = 'vaapi'
+            ff_opts['hwaccel_device'] = '/dev/dri/renderD128'
+            print("Using Intel H.264 hardware acceleration (VAAPI)")
+
+        # Windows hardware acceleration (DXVA2)
+        elif system == 'Windows':
+            ff_opts['hwaccel'] = 'dxva2'
+            print("Using Windows H.264 hardware acceleration (DXVA2)")
+
+        else:
+            print("Using software H.264 decoding (no hardware acceleration detected)")
+
+        return ff_opts
 
     def run(self):
-        """Play video with synchronized audio - QQ Player style smooth playback"""
+        """Optimized playback with H.264 hardware acceleration and frame buffering"""
         try:
-            # Create MediaPlayer with optimized settings for smooth playback
-            ff_opts = {
-                'paused': False,
-                'autoexit': False,
-            }
+            # Create MediaPlayer with hardware acceleration
+            ff_opts = self.get_hardware_codec_options()
 
-            self.player = MediaPlayer(self.video_path, ff_opts=ff_opts)
+            try:
+                self.player = MediaPlayer(self.video_path, ff_opts=ff_opts)
+            except Exception as e:
+                # Fallback to software decoding if hardware acceleration fails
+                print(f"Hardware acceleration failed, using software decoding: {e}")
+                ff_opts = {'paused': False, 'autoexit': False, 'sync': 'audio'}
+                self.player = MediaPlayer(self.video_path, ff_opts=ff_opts)
 
             start_time = time.time()
             last_frame = None
             frame_count = 0
+            dropped_frames = 0
 
-            # Performance tracking for smooth playback
+            # Performance tracking
             last_pts = 0
-            audio_pts = 0
+            target_frame_time = 1.0 / 30.0  # Assume 30fps, will adjust dynamically
+            fps_samples = []
 
-            print(f"Starting smooth playback: {self.video_path}")
+            print(f"Starting optimized H.264 playback: {self.video_path}")
 
-            # Main playback loop - synchronized to audio
+            # Pre-buffer frames before starting display
+            prebuffer_count = 0
+            while prebuffer_count < FRAME_BUFFER_SIZE and self.running:
+                frame_data, val = self.player.get_frame()
+                if frame_data is not None:
+                    img, pts = frame_data
+                    if img is not None:
+                        width, height = img.get_size()
+                        buf = img.to_bytearray()[0]
+
+                        # Use frame pool for memory efficiency
+                        frame_shape = (height, width, 3)
+                        frame_rgb = self.frame_pool.get(frame_shape)
+                        np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3, out=frame_rgb)
+
+                        self.frame_buffer.append((frame_rgb.copy(), pts))
+                        prebuffer_count += 1
+                else:
+                    time.sleep(0.001)
+
+            print(f"Pre-buffered {prebuffer_count} frames")
+
+            # Main playback loop - optimized with frame buffering
+            last_display_time = time.time()
+
             while self.running:
                 # Check duration limit
                 if self.duration > 0:
@@ -63,64 +173,88 @@ class VideoThread(QThread):
                         print(f"Duration limit reached: {elapsed:.2f}s")
                         break
 
-                # Get frame with timing info
-                frame_data, val = self.player.get_frame()
+                # Display buffered frame if available
+                if self.frame_buffer:
+                    frame_rgb, pts = self.frame_buffer.popleft()
 
-                if val == 'eof':
-                    print("End of file reached")
-                    break
-                elif val == 'paused':
-                    time.sleep(0.01)
-                    continue
+                    # Get audio sync
+                    audio_pts = self.player.get_pts()
 
-                if frame_data is None:
-                    # No frame ready yet, small wait
-                    time.sleep(0.002)
-                    continue
+                    # Calculate frame timing
+                    current_time = time.time()
+                    frame_display_time = current_time - last_display_time
+                    last_display_time = current_time
 
-                # Extract image and presentation timestamp
-                img, pts = frame_data
-
-                if img is None:
-                    continue
-
-                # Get audio/video sync info
-                audio_pts = self.player.get_pts()
-
-                # Convert image to numpy array (RGB format)
-                try:
-                    width, height = img.get_size()
-                    buf = img.to_bytearray()[0]
-                    frame_rgb = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
+                    # Dynamic FPS estimation
+                    if len(fps_samples) < 30:
+                        fps_samples.append(frame_display_time)
+                        if len(fps_samples) >= 10:
+                            avg_frame_time = sum(fps_samples) / len(fps_samples)
+                            target_frame_time = avg_frame_time
 
                     # Emit frame for display
-                    last_frame = frame_rgb.copy()
                     self.frame_ready.emit(frame_rgb)
+                    last_frame = frame_rgb
                     frame_count += 1
 
-                except Exception as e:
-                    print(f"Frame conversion error: {e}")
-                    continue
+                    # Return frame to pool
+                    self.frame_pool.release(frame_rgb)
 
-                # A/V sync: Calculate delay based on audio position
-                if audio_pts > 0 and pts > 0:
-                    delay = pts - audio_pts
+                    # Precise A/V sync
+                    if audio_pts > 0 and pts > 0:
+                        delay = pts - audio_pts
 
-                    # Smooth sync adjustment
-                    if delay > 0.001:  # Video ahead of audio
-                        # Sleep to sync with audio
-                        sleep_time = min(delay, 0.1)  # Cap at 100ms
-                        time.sleep(sleep_time)
-                    elif delay < -0.05:  # Video behind audio (>50ms)
-                        # Skip this frame to catch up (frame dropping)
-                        continue
-                else:
-                    # No audio sync available, minimal sleep
-                    time.sleep(0.001)
+                        if delay > 0.002:  # Video ahead of audio (>2ms)
+                            # Sleep to sync with audio
+                            sleep_time = min(delay, 0.05)  # Cap at 50ms
+                            time.sleep(sleep_time)
+                        elif delay < -0.08:  # Video behind audio (>80ms)
+                            # Drop frames to catch up
+                            dropped_frames += 1
+                            continue
+                    else:
+                        # No audio sync, use target frame time
+                        time.sleep(max(0.001, target_frame_time - frame_display_time))
 
-                last_pts = pts
+                # Fetch next frame to maintain buffer
+                while len(self.frame_buffer) < FRAME_BUFFER_SIZE and self.running:
+                    frame_data, val = self.player.get_frame()
 
-            print(f"Playback finished: {frame_count} frames, {time.time() - start_time:.2f}s")
+                    if val == 'eof':
+                        print("End of file reached")
+                        self.running = False
+                        break
+                    elif val == 'paused':
+                        time.sleep(0.01)
+                        break
+
+                    if frame_data is None:
+                        time.sleep(0.001)
+                        break
+
+                    img, pts = frame_data
+                    if img is None:
+                        break
+
+                    try:
+                        width, height = img.get_size()
+                        buf = img.to_bytearray()[0]
+
+                        # Use frame pool for memory efficiency
+                        frame_shape = (height, width, 3)
+                        frame_rgb = self.frame_pool.get(frame_shape)
+                        np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3, out=frame_rgb)
+
+                        self.frame_buffer.append((frame_rgb.copy(), pts))
+
+                    except Exception as e:
+                        print(f"Frame conversion error: {e}")
+                        break
+
+            playback_time = time.time() - start_time
+            fps = frame_count / playback_time if playback_time > 0 else 0
+            print(f"Playback finished: {frame_count} frames, {playback_time:.2f}s, {fps:.2f} fps")
+            print(f"Dropped frames: {dropped_frames} ({(dropped_frames/frame_count*100) if frame_count > 0 else 0:.1f}%)")
 
         except Exception as e:
             print(f"Playback error: {e}")
@@ -135,6 +269,9 @@ class VideoThread(QThread):
                 except:
                     pass
                 self.player = None
+
+            # Clear buffers
+            self.frame_buffer.clear()
 
             # Send last frame
             if last_frame is not None:
@@ -213,7 +350,8 @@ class IPCServerThread(QThread):
         self.running = False
 
 
-class AdPlayerWindow(QMainWindow):
+class OptimizedAdPlayerWindow(QMainWindow):
+    """Optimized window with hardware acceleration and reduced CPU usage"""
     def __init__(self, background_image=None):
         super().__init__()
 
@@ -223,10 +361,14 @@ class AdPlayerWindow(QMainWindow):
         self.is_transitioning = False
         self.pending_command = None
 
-        # Setup window with optimized rendering for smooth playback
-        self.setWindowTitle('Smooth Video Player - QQ Player Style')
+        # Cache for scaled frames to reduce CPU usage
+        self._frame_cache = None
+        self._cache_key = None
 
-        # Enable optimized rendering attributes for smooth video
+        # Setup window with optimized rendering
+        self.setWindowTitle('Optimized H.264 Video Player - Hardware Accelerated')
+
+        # Enable optimized rendering attributes
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAttribute(Qt.WA_NoSystemBackground, False)
         self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
@@ -234,11 +376,11 @@ class AdPlayerWindow(QMainWindow):
 
         self.showFullScreen()
 
-        # Create label for displaying content with performance optimization
+        # Create label for displaying content
         self.label = QLabel(self)
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet("background-color: black;")
-        self.label.setScaledContents(False)  # Manual scaling for control
+        self.label.setScaledContents(False)
         self.setCentralWidget(self.label)
 
         # Setup opacity effect for smooth transitions
@@ -246,9 +388,9 @@ class AdPlayerWindow(QMainWindow):
         self.label.setGraphicsEffect(self.opacity_effect)
         self.opacity_effect.setOpacity(1.0)
 
-        # Setup fade animation (150ms transition)
+        # Setup fade animation (100ms for snappier transitions)
         self.fade_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.fade_animation.setDuration(150)
+        self.fade_animation.setDuration(100)
         self.fade_animation.setEasingCurve(QEasingCurve.InOutQuad)
         self.fade_animation.finished.connect(self.on_fade_finished)
 
@@ -260,6 +402,14 @@ class AdPlayerWindow(QMainWindow):
         self.ipc_thread = IPCServerThread()
         self.ipc_thread.command_received.connect(self.handle_ipc_command)
         self.ipc_thread.start()
+
+        # Get screen size once and cache
+        screen = QApplication.primaryScreen()
+        screen_geometry = screen.geometry()
+        self.screen_width = screen_geometry.width()
+        self.screen_height = screen_geometry.height()
+
+        print(f"Screen resolution: {self.screen_width}x{self.screen_height}")
 
         # Delay background display until window is fully initialized
         if self.background_image and os.path.exists(self.background_image):
@@ -287,65 +437,52 @@ class AdPlayerWindow(QMainWindow):
             self.close()
 
     def display_image(self, image_path, duration, is_background=False):
-        """Display image with smart full-screen sizing"""
+        """Display image with optimized scaling using cv2 for consistency"""
         try:
-            # Load image with Pillow for better quality
-            pil_image = Image.open(image_path)
+            # Read image with cv2 (faster than PIL for our use case)
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"Failed to load image: {image_path}")
+                return
 
-            # Convert to RGB if needed
-            if pil_image.mode != 'RGB':
-                pil_image = pil_image.convert('RGB')
+            # Convert BGR to RGB
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-            # Get screen size - use actual screen geometry
-            from PyQt5.QtWidgets import QApplication
-            screen = QApplication.primaryScreen()
-            screen_geometry = screen.geometry()
-            screen_width = screen_geometry.width()
-            screen_height = screen_geometry.height()
+            img_height, img_width = img.shape[:2]
 
-            # Fallback to label size if needed
-            if screen_width <= 0 or screen_height <= 0:
-                screen_size = self.label.size()
-                screen_width = screen_size.width()
-                screen_height = screen_size.height()
-
-            # Calculate optimal scaling to fit full screen
-            img_width, img_height = pil_image.size
-
+            # Calculate optimal scaling
             if is_background:
-                # Background: fill entire screen (may crop to maintain aspect ratio)
-                scale = max(screen_width / img_width, screen_height / img_height)
+                # Background: fill entire screen (may crop)
+                scale = max(self.screen_width / img_width, self.screen_height / img_height)
             else:
-                # Regular media: fit entire image (may have black bars)
-                scale = min(screen_width / img_width, screen_height / img_height)
+                # Regular media: fit entire image (may have letterbox)
+                scale = min(self.screen_width / img_width, self.screen_height / img_height)
 
             new_width = int(img_width * scale)
             new_height = int(img_height * scale)
 
-            print(f"Image size adjusted: {img_width}x{img_height} → {new_width}x{new_height} (screen: {screen_width}x{screen_height}, bg={is_background})")
+            print(f"Image size adjusted: {img_width}x{img_height} → {new_width}x{new_height} (bg={is_background})")
 
-            # Resize with high quality (LANCZOS)
-            pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
+            # Resize with optimized interpolation (INTER_AREA for downscaling, INTER_LINEAR for upscaling)
+            if scale < 1.0:
+                img_resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+            else:
+                img_resized = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
 
-            # Center crop if background and image is larger than screen
-            if is_background and (new_width > screen_width or new_height > screen_height):
-                left = (new_width - screen_width) // 2
-                top = (new_height - screen_height) // 2
-                right = left + screen_width
-                bottom = top + screen_height
-                pil_image = pil_image.crop((left, top, right, bottom))
-                print(f"Background cropped to: {screen_width}x{screen_height}")
+            # Center crop if background and oversized
+            if is_background and (new_width > self.screen_width or new_height > self.screen_height):
+                start_x = (new_width - self.screen_width) // 2
+                start_y = (new_height - self.screen_height) // 2
+                img_resized = img_resized[start_y:start_y+self.screen_height, start_x:start_x+self.screen_width]
+                print(f"Background cropped to: {self.screen_width}x{self.screen_height}")
 
-            # Convert to QPixmap with high quality
-            img_array = np.array(pil_image)
-            height, width, channel = img_array.shape
+            # Convert to QImage (optimized path)
+            height, width, channel = img_resized.shape
             bytes_per_line = 3 * width
-
-            q_image = QImage(img_array.data, width, height, bytes_per_line, QImage.Format_RGB888)
+            q_image = QImage(img_resized.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
             # Create pixmap
-            pixmap = QPixmap.fromImage(q_image)
-
+            pixmap = QPixmap.fromImage(q_image.copy())  # Copy to prevent data corruption
             self.label.setPixmap(pixmap)
 
             # Set timer if duration specified
@@ -354,76 +491,79 @@ class AdPlayerWindow(QMainWindow):
 
         except Exception as e:
             print(f"Error displaying image {image_path}: {e}")
+            import traceback
+            traceback.print_exc()
 
     def display_video(self, video_path, duration):
-        """Display video with smart full-screen sizing"""
+        """Display video with hardware-accelerated H.264 decoding"""
         try:
             # Stop any running video thread
             if self.video_thread and self.video_thread.isRunning():
                 self.video_thread.stop()
                 self.video_thread.wait()
 
-            # Clear cached video size to recalculate for new video
+            # Clear cache
+            self._frame_cache = None
+            self._cache_key = None
             if hasattr(self, '_cached_video_size'):
                 delattr(self, '_cached_video_size')
             if hasattr(self, '_cached_display_size'):
                 delattr(self, '_cached_display_size')
 
-            # Create and start video thread
-            self.video_thread = VideoThread(video_path, duration)
-            self.video_thread.frame_ready.connect(self.update_frame)
+            # Create and start optimized video thread
+            self.video_thread = OptimizedVideoThread(video_path, duration)
+            self.video_thread.frame_ready.connect(self.update_frame_optimized)
             self.video_thread.playback_finished.connect(self.on_video_finished)
             self.video_thread.start()
 
         except Exception as e:
             print(f"Error displaying video {video_path}: {e}")
+            import traceback
+            traceback.print_exc()
 
-    def update_frame(self, frame):
-        """Update display with new video frame - OPTIMIZED for smooth playback"""
+    def update_frame_optimized(self, frame):
+        """Optimized frame update with caching and minimal memory copies"""
         try:
             # Get frame dimensions
             height, width, channel = frame.shape
 
-            # Check if video resolution changed or cache doesn't exist
+            # Calculate scaling once and cache
             cache_key = f"{width}x{height}"
             if not hasattr(self, '_cached_video_size') or self._cached_video_size != cache_key:
-                from PyQt5.QtWidgets import QApplication
-                screen = QApplication.primaryScreen()
-                screen_geometry = screen.geometry()
-                screen_width = screen_geometry.width()
-                screen_height = screen_geometry.height()
-
-                # Fallback to label size if needed
-                if screen_width <= 0 or screen_height <= 0:
-                    screen_size = self.label.size()
-                    screen_width = screen_size.width()
-                    screen_height = screen_size.height()
-
-                # Calculate optimal scaling to fit full screen while maintaining aspect ratio
-                scale = min(screen_width / width, screen_height / height)
+                # Calculate optimal scaling
+                scale = min(self.screen_width / width, self.screen_height / height)
                 new_width = int(width * scale)
                 new_height = int(height * scale)
 
-                # Cache dimensions for this video resolution
+                # Cache dimensions
                 self._cached_video_size = cache_key
                 self._cached_display_size = (new_width, new_height)
 
-                print(f"Video size adjusted: {width}x{height} → {new_width}x{new_height} (screen: {screen_width}x{screen_height})")
+                print(f"Video size adjusted: {width}x{height} → {new_width}x{new_height} (screen: {self.screen_width}x{self.screen_height})")
             else:
                 new_width, new_height = self._cached_display_size
 
-            # Fast bilinear interpolation for smoother real-time playback
-            # INTER_LINEAR is faster than LANCZOS4 and still provides good quality
-            frame_resized = cv2.resize(frame, (new_width, new_height),
-                                      interpolation=cv2.INTER_LINEAR)
+            # Ultra-fast scaling with INTER_NEAREST for real-time performance on low-power devices
+            # Use INTER_LINEAR for better quality if CPU allows
+            if platform.machine().lower() in ['armv7l', 'aarch64']:
+                # Raspberry Pi: Use INTER_NEAREST for maximum performance
+                interpolation = cv2.INTER_NEAREST
+            else:
+                # Desktop: Use INTER_LINEAR for better quality
+                interpolation = cv2.INTER_LINEAR
 
-            # Direct conversion to QImage without intermediate steps
+            frame_resized = cv2.resize(frame, (new_width, new_height), interpolation=interpolation)
+
+            # Direct conversion to QImage without intermediate copies
             bytes_per_line = 3 * new_width
+
+            # Create QImage directly from numpy array
+            # IMPORTANT: Keep frame_resized in scope until QPixmap is created
             q_image = QImage(frame_resized.data, new_width, new_height,
                            bytes_per_line, QImage.Format_RGB888)
 
-            # Fast pixmap conversion
-            pixmap = QPixmap.fromImage(q_image)
+            # Fast pixmap conversion (copy needed to avoid data corruption)
+            pixmap = QPixmap.fromImage(q_image.copy())
 
             # Update display
             self.label.setPixmap(pixmap)
@@ -480,16 +620,12 @@ class AdPlayerWindow(QMainWindow):
 
     def on_media_timeout(self):
         """Called when media duration expires - stay on last frame"""
-        # Don't return to background automatically
-        # Just stop the timer and wait for next command
         self.media_timer.stop()
 
     def on_video_finished(self, last_frame):
         """Called when video playback finishes - hold last frame cleanly"""
-        # Don't return to background automatically
-        # Display the last frame as a static image to prevent freezing
         if last_frame is not None and last_frame.size > 0:
-            self.update_frame(last_frame)
+            self.update_frame_optimized(last_frame)
             print("Video finished - holding last frame")
 
     def fade_in(self):
@@ -591,7 +727,7 @@ def kill_existing_instance():
             try:
                 command = {'command': 'EXIT'}
                 send_ipc_command(command)
-                time.sleep(0.01)  # Wait for graceful shutdown
+                time.sleep(0.01)
             except:
                 pass
 
@@ -614,14 +750,14 @@ def kill_existing_instance():
         if os.path.exists(IPC_SOCKET_PATH):
             os.remove(IPC_SOCKET_PATH)
 
-        time.sleep(0.01)  # Wait for cleanup
+        time.sleep(0.01)
 
     except Exception as e:
         print(f"Error killing instance: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Video Player with IPC Control')
+    parser = argparse.ArgumentParser(description='Optimized H.264 Video Player with Hardware Acceleration')
     parser.add_argument('--start', metavar='BACKGROUND', help='Start GUI with background image')
     parser.add_argument('--play', nargs=2, metavar=('FILE', 'DURATION'), help='Play file with duration')
     parser.add_argument('--stop', action='store_true', help='Stop playback')
@@ -639,7 +775,7 @@ def main():
 
         # Start new GUI instance
         app = QApplication(sys.argv)
-        window = AdPlayerWindow(background_image=args.start)
+        window = OptimizedAdPlayerWindow(background_image=args.start)
         sys.exit(app.exec_())
 
     # Handle --play command
@@ -654,7 +790,6 @@ def main():
                 print(f"Play command sent: {filepath}")
 
                 # Wait for exact playback duration + minimal transition buffer
-                # Duration (actual playback) + fade transitions (300ms) + safety margin (100ms)
                 wait_time = duration + 0.00001
                 print(f"Waiting {wait_time}s for playback to complete...")
                 time.sleep(wait_time)
