@@ -173,12 +173,11 @@ s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(0.5)
 try:
     s.connect(SOCK)
-    s.send(json.dumps({"command": "PING"}).encode("utf-8"))
-    try:
-        _ = s.recv(2)
-    except Exception:
-        pass
-    sys.exit(0)
+    s.send(json.dumps({"command": "STATUS"}).encode("utf-8"))
+    resp = s.recv(16)
+    if resp == b"READY":
+        sys.exit(0)
+    sys.exit(1)
 except Exception:
     sys.exit(1)
 finally:
@@ -188,14 +187,14 @@ finally:
         pass
 PY
                 then
-                    echo "GUI ready (IPC up)"
+                    echo "GUI ready (background displayed)"
                     break
                 fi
             fi
 
             # Timeout handling
             if [ $(( $(date +%s) - start_ts )) -ge $READY_WAIT_SECS ]; then
-                echo "WARNING: GUI started but IPC not ready after ${READY_WAIT_SECS}s"
+                echo "WARNING: GUI started but background not ready after ${READY_WAIT_SECS}s"
                 break
             fi
             sleep 0.2
